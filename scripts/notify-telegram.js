@@ -1,17 +1,17 @@
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
- 
+
 const STATE_DOC = 'appdata/telegram-notify-state'; // remembers what's already been reported
- 
+
 async function main() {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
   admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   const db = admin.firestore();
- 
+
   const state = await getState(db);
   const nowMs = Date.now();
- 
-  // Shared lookups — fetched once, used by all three checks below
+
+  // Shared lookups — fetched once, used by all four checks below
   const [workersDoc, targetsDoc, failsDoc] = await Promise.all([
     db.collection('appdata').doc('perf-workers').get(),
     db.collection('appdata').doc('perf-targets').get(),
@@ -24,9 +24,9 @@ async function main() {
   workers.forEach(w => { nameById[w.id] = w.name; });
   const targetById = {};
   targets.forEach(t => { targetById[t.id] = t; });
- 
+
   const lines = [];
- 
+
   // ---- 1. Pending reviews right now, itemized ----
   const pendingSnap = await db.collection('perf_submissions_docs').where('status', '==', 'pending').get();
   const pendingSubs = pendingSnap.docs.map(d => d.data());
@@ -39,17 +39,19 @@ async function main() {
       lines.push(`   • ${name} — ${title}`);
     });
   }
- 
-  // ---- 2. New fails since last run, itemized ----
-  const newFails = allFails.filter(f => f.failedAt && new Date(f.failedAt).getTime() > state.lastRunMs);
-  if (newFails.length > 0) {
-    lines.push(`⚠️ *New fails (${newFails.length})*`);
-    newFails.forEach(f => {
-      const name = nameById[f.workerId] || 'Someone';
-      lines.push(`   • ${name} — ${f.title || 'a task'}`);
+
+  // ---- 2. Challenger tasks accepted since last run, itemized ----
+  const newlyAccepted = targets.filter(t =>
+    t.sideQuestId && t.acceptedAt && new Date(t.acceptedAt).getTime() > state.lastRunMs
+  );
+  if (newlyAccepted.length > 0) {
+    lines.push(`🙋 *Challenger tasks accepted (${newlyAccepted.length})*`);
+    newlyAccepted.forEach(t => {
+      const name = nameById[t.workerId] || 'Someone';
+      lines.push(`   • ${name} — ${t.title}`);
     });
   }
- 
+
   // ---- 3. Challenger tasks expiring within the hour, itemized with time left ----
   const soonExpiring = targets.filter(t =>
     t.status === 'active' && t.sideQuestId && t.expiresAt &&
@@ -64,7 +66,17 @@ async function main() {
       lines.push(`   • ${name} — ${t.title} (${minsLeft} min left)`);
     });
   }
- 
+
+  // ---- 4. New fails since last run, itemized ----
+  const newFails = allFails.filter(f => f.failedAt && new Date(f.failedAt).getTime() > state.lastRunMs);
+  if (newFails.length > 0) {
+    lines.push(`⚠️ *New fails (${newFails.length})*`);
+    newFails.forEach(f => {
+      const name = nameById[f.workerId] || 'Someone';
+      lines.push(`   • ${name} — ${f.title || 'a task'}`);
+    });
+  }
+
   // ---- Send, only if there's something to say ----
   if (lines.length > 0) {
     const message = ['*Exprexa Performance update*', '', ...lines].join('\n');
@@ -73,10 +85,10 @@ async function main() {
   } else {
     console.log('Nothing new to report — no message sent.');
   }
- 
+
   await setState(db, { lastRunMs: nowMs });
 }
- 
+
 async function getState(db) {
   const doc = await db.doc(STATE_DOC).get();
   if (doc.exists) return doc.data();
@@ -85,7 +97,7 @@ async function getState(db) {
 async function setState(db, state) {
   await db.doc(STATE_DOC).set(state);
 }
- 
+
 async function sendTelegramMessage(text) {
   const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   const res = await fetch(url, {
@@ -102,7 +114,7 @@ async function sendTelegramMessage(text) {
     throw new Error(`Telegram send failed (${res.status}): ${errText}`);
   }
 }
- 
+
 main().catch(err => {
   console.error(err);
   process.exit(1);
