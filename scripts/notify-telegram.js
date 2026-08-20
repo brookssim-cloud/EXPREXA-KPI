@@ -1,52 +1,70 @@
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-
+ 
 const STATE_DOC = 'appdata/telegram-notify-state'; // remembers what's already been reported
-
+ 
 async function main() {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
   admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   const db = admin.firestore();
-
+ 
   const state = await getState(db);
   const nowMs = Date.now();
-
-  const lines = [];
-
-  // ---- 1. Pending reviews right now ----
-  const pendingSnap = await db.collection('perf_submissions_docs').where('status', '==', 'pending').get();
-  const pendingCount = pendingSnap.size;
-  if (pendingCount > 0) {
-    lines.push(`📋 *${pendingCount}* submission${pendingCount === 1 ? '' : 's'} waiting for review`);
-  }
-
-  // ---- 2. New fails since last run ----
-  const failsDoc = await db.collection('appdata').doc('perf-fails').get();
+ 
+  // Shared lookups — fetched once, used by all three checks below
+  const [workersDoc, targetsDoc, failsDoc] = await Promise.all([
+    db.collection('appdata').doc('perf-workers').get(),
+    db.collection('appdata').doc('perf-targets').get(),
+    db.collection('appdata').doc('perf-fails').get(),
+  ]);
+  const workers = (workersDoc.exists ? workersDoc.data().value : []) || [];
+  const targets = (targetsDoc.exists ? targetsDoc.data().value : []) || [];
   const allFails = (failsDoc.exists ? failsDoc.data().value : []) || [];
-  const newFails = allFails.filter(f => f.failedAt && new Date(f.failedAt).getTime() > state.lastRunMs);
-  if (newFails.length > 0) {
-    const workersDoc = await db.collection('appdata').doc('perf-workers').get();
-    const workers = (workersDoc.exists ? workersDoc.data().value : []) || [];
-    const nameById = {};
-    workers.forEach(w => { nameById[w.id] = w.name; });
-    newFails.forEach(f => {
-      const name = nameById[f.workerId] || 'Someone';
-      lines.push(`⚠️ *${name}* missed: ${f.title || 'a task'}`);
+  const nameById = {};
+  workers.forEach(w => { nameById[w.id] = w.name; });
+  const targetById = {};
+  targets.forEach(t => { targetById[t.id] = t; });
+ 
+  const lines = [];
+ 
+  // ---- 1. Pending reviews right now, itemized ----
+  const pendingSnap = await db.collection('perf_submissions_docs').where('status', '==', 'pending').get();
+  const pendingSubs = pendingSnap.docs.map(d => d.data());
+  if (pendingSubs.length > 0) {
+    lines.push(`📋 *Pending reviews (${pendingSubs.length})*`);
+    pendingSubs.forEach(s => {
+      const name = nameById[s.workerId] || 'Unknown worker';
+      const target = targetById[s.targetId];
+      const title = target ? target.title : (s.title || 'a task');
+      lines.push(`   • ${name} — ${title}`);
     });
   }
-
-  // ---- 3. Challenger tasks expiring within the hour, still not submitted ----
-  const targetsDoc = await db.collection('appdata').doc('perf-targets').get();
-  const targets = (targetsDoc.exists ? targetsDoc.data().value : []) || [];
+ 
+  // ---- 2. New fails since last run, itemized ----
+  const newFails = allFails.filter(f => f.failedAt && new Date(f.failedAt).getTime() > state.lastRunMs);
+  if (newFails.length > 0) {
+    lines.push(`⚠️ *New fails (${newFails.length})*`);
+    newFails.forEach(f => {
+      const name = nameById[f.workerId] || 'Someone';
+      lines.push(`   • ${name} — ${f.title || 'a task'}`);
+    });
+  }
+ 
+  // ---- 3. Challenger tasks expiring within the hour, itemized with time left ----
   const soonExpiring = targets.filter(t =>
     t.status === 'active' && t.sideQuestId && t.expiresAt &&
     new Date(t.expiresAt).getTime() > nowMs &&
     new Date(t.expiresAt).getTime() < nowMs + 60 * 60 * 1000
   );
   if (soonExpiring.length > 0) {
-    lines.push(`⏱ *${soonExpiring.length}* challenger task${soonExpiring.length === 1 ? '' : 's'} expiring within the hour`);
+    lines.push(`⏱ *Expiring within the hour (${soonExpiring.length})*`);
+    soonExpiring.forEach(t => {
+      const name = nameById[t.workerId] || 'Unknown worker';
+      const minsLeft = Math.max(0, Math.round((new Date(t.expiresAt).getTime() - nowMs) / 60000));
+      lines.push(`   • ${name} — ${t.title} (${minsLeft} min left)`);
+    });
   }
-
+ 
   // ---- Send, only if there's something to say ----
   if (lines.length > 0) {
     const message = ['*Exprexa Performance update*', '', ...lines].join('\n');
@@ -55,10 +73,10 @@ async function main() {
   } else {
     console.log('Nothing new to report — no message sent.');
   }
-
+ 
   await setState(db, { lastRunMs: nowMs });
 }
-
+ 
 async function getState(db) {
   const doc = await db.doc(STATE_DOC).get();
   if (doc.exists) return doc.data();
@@ -67,7 +85,7 @@ async function getState(db) {
 async function setState(db, state) {
   await db.doc(STATE_DOC).set(state);
 }
-
+ 
 async function sendTelegramMessage(text) {
   const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   const res = await fetch(url, {
@@ -84,7 +102,7 @@ async function sendTelegramMessage(text) {
     throw new Error(`Telegram send failed (${res.status}): ${errText}`);
   }
 }
-
+ 
 main().catch(err => {
   console.error(err);
   process.exit(1);
