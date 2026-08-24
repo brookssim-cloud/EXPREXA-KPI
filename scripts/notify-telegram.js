@@ -98,20 +98,57 @@ async function setState(db, state) {
   await db.doc(STATE_DOC).set(state);
 }
 
+// Telegram rejects any single message over 4096 characters. A long digest
+// (e.g. a big backlog of pending reviews, each listed by name) can easily
+// exceed that, so split it into chunks at line boundaries and send in
+// sequence rather than losing the whole notification to a 400 error.
+const TELEGRAM_MAX_CHARS = 3900; // headroom under the 4096 hard limit
+
+function splitIntoChunks(text) {
+  if (text.length <= TELEGRAM_MAX_CHARS) return [text];
+  const lines = text.split('\n');
+  const chunks = [];
+  let current = '';
+  for (const line of lines) {
+    // A single line longer than the limit is rare, but hard-split it if so
+    if (line.length > TELEGRAM_MAX_CHARS) {
+      if (current) { chunks.push(current); current = ''; }
+      for (let i = 0; i < line.length; i += TELEGRAM_MAX_CHARS) {
+        chunks.push(line.slice(i, i + TELEGRAM_MAX_CHARS));
+      }
+      continue;
+    }
+    if ((current + '\n' + line).length > TELEGRAM_MAX_CHARS) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = current ? current + '\n' + line : line;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 async function sendTelegramMessage(text) {
   const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'Markdown',
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Telegram send failed (${res.status}): ${errText}`);
+  const chunks = splitIntoChunks(text);
+  for (let i = 0; i < chunks.length; i++) {
+    const body = chunks.length > 1
+      ? `${chunks[i]}\n\n_(part ${i + 1} of ${chunks.length})_`
+      : chunks[i];
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text: body,
+        parse_mode: 'Markdown',
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Telegram send failed (${res.status}): ${errText}`);
+    }
   }
 }
 
