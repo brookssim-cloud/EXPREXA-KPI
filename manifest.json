@@ -1,0 +1,27 @@
+{
+  "name": "Exprexa Performance",
+  "short_name": "Performance",
+  "description": "Daily targets, points and rewards for the Exprexa team.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#14213D",
+  "theme_color": "#14213D",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["business", "productivity"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Submit my tasks",
+      "short_name": "My tasks",
+      "description": "Open the worker portal straight away",
+      "url": "./#worker"
+    }
+  ]
+}
