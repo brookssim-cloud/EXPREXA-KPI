@@ -537,7 +537,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-10-21l';
+  const APP_BUILD = '2026-10-21n';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -615,6 +615,32 @@
                        // submission now costs more than it ever did
     challenger:  10    // challenger tasks completed vs accepted
   };
+  // How a component is written on a card.
+  //
+  // One decimal, and never rounded upward. One quality issue against 225
+  // submissions is 99.548%, which rounded to "100" and sat directly above
+  // a red line reading "1 quality issue" — the card contradicting itself,
+  // and the only real event on it rounded out of sight. Truncating means
+  // 100 appears only when nothing whatsoever went wrong.
+  //
+  // The trailing ".0" is dropped: "97" reads better than "97.0", and a
+  // whole number is exactly the case where the decimal says nothing.
+  function partPct(v){
+    if(v === null || v === undefined) return '';
+    if(v >= 100) return '100';
+    const t = Math.floor(v * 10) / 10;
+    return Number.isInteger(t) ? String(t) : t.toFixed(1);
+  }
+  // The headline score, which keeps its decimal place even when it is a
+  // zero. 97.08 and 97.00 are not the same thing, and in a column of
+  // fourteen people a figure that quietly drops its decimal reads as the
+  // exact one while its neighbours read as approximations. Same rule
+  // otherwise: truncated, so 100 means 100.
+  function scorePct(v){
+    if(v === null || v === undefined) return '';
+    if(v >= 100) return '100';
+    return (Math.floor(v * 10) / 10).toFixed(1);
+  }
   // Season only. A season runs about three months, and shorter windows
   // fluctuate too much to say anything useful about someone's performance.
   const SCORE_PERIODS = [
@@ -3077,8 +3103,13 @@
       weightUsed += SCORE_WEIGHTS[k];
     });
     if(weightUsed === 0) return null;
+    const exact = total / weightUsed;
     return {
-      score: Math.round(total / weightUsed),
+      // Both, because they answer different questions. `exact` is what is
+      // shown and what decides rank; `score` stays a whole number for the
+      // band thresholds and anything that only wants a round figure.
+      score: Math.round(exact),
+      exact,
       parts,
       counts: {
         dailyAssigned, dailyDone,
@@ -3635,7 +3666,8 @@
       const ranks = await getScoreRanks();
       const mine = ranks && ranks.byWorker ? ranks.byWorker[worker.id] : null;
       if(mine){
-        myScore = { score: mine.score, parts: mine.parts || {}, counts: mine.counts || {} };
+        myScore = { score: mine.score, exact: mine.exact,
+          parts: mine.parts || {}, counts: mine.counts || {} };
         myRankInfo = { rank: mine.rank, total: ranks.total, updatedAt: ranks.updatedAt };
       }
     }catch(e){
@@ -3704,15 +3736,15 @@
           <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
             <span style="font-size:10.5px;color:var(--muted);width:78px;">${label}</span>
             <div style="flex:1;height:6px;background:var(--paper);border-radius:3px;overflow:hidden;">
-              <div style="height:100%;width:${Math.round(val)}%;background:${val>=70?'var(--green)':val>=50?'var(--amber)':'var(--red)'};"></div>
+              <div style="height:100%;width:${Math.max(0,Math.min(100,val))}%;background:${val>=70?'var(--green)':val>=50?'var(--amber)':'var(--red)'};"></div>
             </div>
-            <span style="font-size:10.5px;color:var(--muted);width:26px;text-align:right;">${Math.round(val)}</span>
+            <span style="font-size:10.5px;color:var(--muted);width:34px;text-align:right;">${partPct(val)}</span>
           </div>`;
         return `
         <div class="eyebrow">My score &middot; this season</div>
         <div class="card" style="margin-bottom:16px;">
           <div style="text-align:center;">
-            <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:34px;color:${b.color};line-height:1;">${myScore.score}</div>
+            <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:34px;color:${b.color};line-height:1;">${scorePct(myScore.exact != null ? myScore.exact : myScore.score)}</div>
             <div style="font-size:11.5px;color:${b.color};font-weight:600;margin-top:2px;">${b.label}</div>
             ${myRankInfo ? `<div style="font-size:12px;color:var(--ink);font-weight:600;margin-top:6px;">Ranked #${myRankInfo.rank} of ${myRankInfo.total}</div>
               <div style="font-size:10px;color:var(--muted);">updated ${new Date(myRankInfo.updatedAt).toLocaleDateString()}</div>` : ''}
@@ -7323,7 +7355,7 @@
             <div class="rep-sub">Season performance report</div>
           </div>
           <div style="text-align:right;">
-            <div class="rep-score">${r.score}</div>
+            <div class="rep-score">${scorePct(r.exact != null ? r.exact : r.score)}</div>
             <div style="font-size:10.5px;font-weight:700;color:${b.color};">${b.label.toUpperCase()}</div>
             <div style="color:#A9B3CE;font-size:10px;margin-top:2px;">Rank ${rankOf[w.id]} of ${rows.length}</div>
           </div>
@@ -7350,8 +7382,8 @@
           const v = r.parts[k];
           return `<div class="rep-bar">
             <div class="nm">${LBL[k]}</div>
-            <div class="tk">${v===null?'':`<div style="height:100%;width:${Math.round(v)}%;background:${barCol(v)};"></div>`}</div>
-            <div class="vl">${v===null?'<span style="color:var(--muted);font-weight:400;">n/a</span>':Math.round(v)+'%'}</div>
+            <div class="tk">${v===null?'':`<div style="height:100%;width:${Math.max(0,Math.min(100,v))}%;background:${barCol(v)};"></div>`}</div>
+            <div class="vl">${v===null?'<span style="color:var(--muted);font-weight:400;">n/a</span>':partPct(v)+'%'}</div>
             <div class="wt">${SCORE_WEIGHTS[k]}%</div>
           </div>`;
         }).join('')}
@@ -7411,7 +7443,8 @@
       const rows = workers
         .map(w=>({ w, r: scoreWorker(w.id, { targets, fails, stats, cutoffDate: null, archive, issues }) }))
         .filter(x=>x.r)
-        .sort((a,b)=> b.r.score - a.r.score);
+        .sort((a,b)=> (b.r.exact != null ? b.r.exact : b.r.score)
+                    - (a.r.exact != null ? a.r.exact : a.r.score));
       if(rows.length) await publishScoreRanks(rows, 'season');
     }catch(e){ console.error('Could not refresh scores:', e); }
   }
@@ -7420,7 +7453,8 @@
     try{
       const byWorker = {};
       rows.forEach((x,i)=>{
-        byWorker[x.w.id] = { score: x.r.score, rank: i+1, parts: x.r.parts, counts: x.r.counts };
+        byWorker[x.w.id] = { score: x.r.score, exact: x.r.exact, rank: i+1,
+          parts: x.r.parts, counts: x.r.counts };
       });
       await saveDoc(K_SCORE_RANKS,
         { byWorker, total: rows.length, period: periodKey, updatedAt: new Date().toISOString() });
@@ -7453,7 +7487,8 @@
 
     const rows = workers.map(w=>({ w, r: scoreWorker(w.id, { targets, fails, stats, cutoffDate, archive, issues }) }))
                         .filter(x=>x.r)
-                        .sort((a,b)=> b.r.score - a.r.score);
+                        .sort((a,b)=> (b.r.exact != null ? b.r.exact : b.r.score)
+                                    - (a.r.exact != null ? a.r.exact : a.r.score));
 
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -7474,9 +7509,9 @@
               <div style="display:flex;align-items:center;gap:8px;margin-top:3px;">
                 <span style="font-size:10px;color:var(--muted);width:74px;">${label}</span>
                 <div style="flex:1;height:5px;background:var(--paper);border-radius:3px;overflow:hidden;">
-                  <div style="height:100%;width:${Math.round(val)}%;background:${val>=70?'var(--green)':val>=50?'var(--amber)':'var(--red)'};"></div>
+                  <div style="height:100%;width:${Math.max(0,Math.min(100,val))}%;background:${val>=70?'var(--green)':val>=50?'var(--amber)':'var(--red)'};"></div>
                 </div>
-                <span style="font-size:10px;color:var(--muted);width:26px;text-align:right;">${Math.round(val)}</span>
+                <span style="font-size:10px;color:var(--muted);width:34px;text-align:right;">${partPct(val)}</span>
               </div>`;
             return `
             <div class="card" style="margin-bottom:10px;">
@@ -7486,7 +7521,7 @@
                   <div style="font-size:10.5px;color:var(--muted);">${escapeHtml(x.w.role||'')}</div>
                 </div>
                 <div style="text-align:right;">
-                  <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:22px;color:${b.color};">${x.r.score}</div>
+                  <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:22px;color:${b.color};">${scorePct(x.r.exact != null ? x.r.exact : x.r.score)}</div>
                   <div style="font-size:10px;color:${b.color};font-weight:600;">${b.label}</div>
                   <button class="btn btn-ghost btn-sm" data-report="${x.w.id}" style="padding:2px 8px;font-size:10px;margin-top:4px;">Report</button>
                 </div>
