@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "Exprexa Performance",
-  "short_name": "Performance",
-  "description": "Daily targets, points and rewards for the Exprexa team.",
+  "name": "Exprexa \u2014 My Tasks",
+  "short_name": "My Tasks",
+  "description": "Your daily targets, points and rewards at Exprexa.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -37,10 +37,10 @@
   ],
   "shortcuts": [
     {
-      "name": "Submit my tasks",
-      "short_name": "My tasks",
-      "description": "Open the worker portal straight away",
-      "url": "./#worker"
+      "name": "Admin",
+      "short_name": "Admin",
+      "description": "Open the admin side",
+      "url": "./#admin"
     }
   ]
 }

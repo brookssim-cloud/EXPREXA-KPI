@@ -6,43 +6,36 @@
 <title>Exprexa Performance</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<!-- Installs to the home screen on Android and iPhone.
-     This app has two front doors — the admin app at the plain URL and the
-     worker portal at #worker — and an installed icon can only have one
-     start_url. Safari from 16.4 and every other browser honour that
-     start_url rather than the page the icon was added from, so a single
-     manifest sent every worker who installed from #worker into the admin
-     login instead of their own list.
-     So there are two manifests, and the script below points at whichever
-     one matches the page in front of you at the moment you install. They
-     carry different ids, so a phone can hold both icons if it needs to. -->
-<link rel="manifest" id="app-manifest" href="manifest.json">
+<!-- Installs to the home screen on Android and iPhone. One manifest and
+     one link, written here and never changed by script — an earlier build
+     swapped this href at runtime to choose between a worker and an admin
+     manifest, which cannot work: the browser has already begun fetching
+     whatever the HTML said before any script runs, and it does not read it
+     again. Every install got the wrong one.
+     There is nothing to choose now. The plain address IS the worker
+     portal, so the only manifest is the workers', and the admin app at
+     #admin is reached in a browser rather than from an icon. -->
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#14213D">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
-<meta name="apple-mobile-web-app-title" id="app-title" content="Performance">
+<meta name="apple-mobile-web-app-title" content="My Tasks">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png" type="image/png">
 <script>
-// Runs here in the head rather than with the rest of the app: the manifest
-// has to be right before anyone can reach the share sheet, and the app
-// script waits on Firebase from a CDN, which on a weak signal is seconds
-// away and on a dead one never arrives.
-//
-// Re-run on hashchange because that is how a worker actually gets there —
-// they land on the plain URL, tap their name, and only then think about
-// installing. The link element is live; swapping href is enough.
+// Kept as a safety net, not as the mechanism: anything that arrives at
+// "?worker" — an old installed icon, a link someone pasted — is turned
+// into "#worker" before the router looks, with no reload to watch.
 (function(){
-  function sync(){
-    var worker = /^#worker/.test(location.hash || '');
-    var m = document.getElementById('app-manifest');
-    var t = document.getElementById('app-title');
-    if(m) m.setAttribute('href', worker ? 'manifest-worker.json' : 'manifest.json');
-    if(t) t.setAttribute('content', worker ? 'My Tasks' : 'Performance');
+  // Anything arriving with ?worker or ?admin — an icon installed by an
+  // older build, a link someone pasted — is turned into the matching hash
+  // before the router looks, with no reload to watch.
+  if(!location.hash && /^\?(worker|admin)(?:[=&]|$)/.test(location.search)){
+    var asHash = '#' + location.search.slice(1);
+    try{ history.replaceState(null, '', location.pathname + asHash); }
+    catch(e){ location.hash = asHash.slice(1); }
   }
-  sync();
-  window.addEventListener('hashchange', sync);
 })();
 </script>
 <style>
@@ -511,7 +504,34 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-10-21c';
+  const APP_BUILD = '2026-10-21g';
+  // The address to hand a worker. Built from wherever the app is actually
+  // being served from, so it stays right if the repo or folder is renamed,
+  // and strips any #worker the admin happens to be sitting on.
+  function workerPortalUrl(){
+    var base = window.location.href.split('#')[0].split('?')[0];
+    // The folder, not whatever file is being served from it — "…/KPI/"
+    // reads as an address worth sending, "…/KPI/index.html" reads as
+    // something copied out of an address bar by mistake.
+    return base.replace(/index\.html$/, '');
+  }
+  // Copying beats reading a long URL off a screen and retyping it into
+  // WhatsApp, which is how the wrong link gets sent in the first place.
+  // Delegated from the document because the button is inside a view that
+  // redraws, so a handler bound to the element does not survive.
+  document.addEventListener('click', async function(e){
+    const btn = e.target && e.target.closest && e.target.closest('#copy-worker-link');
+    if(!btn) return;
+    try{
+      await navigator.clipboard.writeText(workerPortalUrl());
+      btn.textContent = 'Copied';
+    }catch(err){
+      // Clipboard access is refused outside a secure context and in some
+      // in-app browsers. Say what to do instead of failing silently.
+      btn.textContent = 'Select it and copy';
+    }
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 2000);
+  });
   const swState = () => window.__sw || {};
   function checkForUpdate(){
     const S = swState();
@@ -3246,14 +3266,22 @@
   const hashParams = parseHash();
   const authedWorkers = new Set(); // resets each session — worker must re-enter PIN after closing/reopening
 
-  if(hashParams.mode === 'worker'){
-    renderWorkerPortal();
-  } else {
+  // The plain address is the worker portal, and the admin app lives at
+  // #admin. It used to be the other way round, which meant an installed
+  // icon could only ever open the admin login — and fourteen of the
+  // sixteen people who install this are workers.
+  //
+  // #worker still works and always will: the 7am job opens it, and it is
+  // in links and bookmarks already.
+  const isAdminRoute = m => m === 'admin';
+  if(isAdminRoute(hashParams.mode)){
     renderAdmin();
+  } else {
+    renderWorkerPortal();
   }
   window.addEventListener('hashchange', ()=>{
     const h = parseHash();
-    if(h.mode === 'worker') renderWorkerPortal(); else renderAdmin();
+    if(isAdminRoute(h.mode)) renderAdmin(); else renderWorkerPortal();
   });
 
   // =========================================================
@@ -3321,6 +3349,13 @@
       <div class="eyebrow" style="margin-bottom:10px;">Who are you?</div>
       <div class="field"><input type="text" id="wp-search" placeholder="Search your name…" autocomplete="off"></div>
       <div id="wp-pick"></div>
+      <!-- A quiet way in for whoever runs this, so the admin side does not
+           mean typing #admin onto the end of the address every time. It
+           gives nothing away: that screen asks for a password regardless
+           of how it was reached. -->
+      <div style="text-align:center;margin-top:26px;">
+        <a href="#admin" style="font-size:11.5px;color:var(--muted);text-decoration:none;">Admin</a>
+      </div>
     `;
     const pick = document.getElementById('wp-pick');
     function renderPickList(query){
@@ -4467,7 +4502,7 @@
           <div class="view" id="view-hell"></div>
           ${CURRENT_ADMIN.isOwner ? '<div class="view" id="view-access"></div>' : ''}
         </div>
-        <footer class="note">Exprexa Performance &middot; workers submit at <span class="mono">#worker</span></footer>
+        <footer class="note">Exprexa Performance &middot; admin at <span class="mono">#admin</span> &middot; workers open the plain address</footer>
       </div>
     `;
     wireBuildTag();
@@ -4877,7 +4912,12 @@
       <div id="lb-list"></div>
       <div class="card" style="margin-top:16px;">
         <div class="eyebrow" style="margin-bottom:6px;">Worker access</div>
-        <div class="help">Share this link so workers can view their targets and submit proof photos: <span class="mono">${window.location.href.split('#')[0]}#worker</span></div>
+        <div class="help">Share this link so workers can view their targets and submit proof photos:
+          <span class="mono" id="worker-link">${escapeHtml(workerPortalUrl())}</span>
+          <button class="btn btn-ghost btn-sm" id="copy-worker-link" style="margin-left:6px;padding:3px 9px;font-size:11px;">Copy</button>
+          <br>They can add it to their home screen straight from there and the icon opens
+          their own list. This admin side is the same address with
+          <span class="mono">#admin</span> on the end — keep that one to yourself.</div>
       </div>
     `;
     document.querySelectorAll('#lb-period-toggle [data-period]').forEach(opt=>{

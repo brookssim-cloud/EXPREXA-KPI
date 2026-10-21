@@ -9,12 +9,11 @@
 // its responses here would hand people stale targets and stale scores —
 // worse than no answer, because it looks like a real one.
 
-const CACHE = 'perf-shell-v2';
+const CACHE = 'perf-shell-v4';
 const SHELL = [
   './',
   './index.html',
   './manifest.json',
-  './manifest-worker.json',
   './icon-192.png',
   './icon-512.png',
   './apple-touch-icon.png'
