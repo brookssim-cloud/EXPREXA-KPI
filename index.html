@@ -590,7 +590,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-10-25i';
+  const APP_BUILD = '2026-10-26a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -4176,6 +4176,24 @@
   }
   // Stored the way every other setting here is — a document under appdata,
   // read through the same cache.
+  // The day's own submission. It cannot come back with the others: those
+  // are fetched by `targetId`, and a day carries `targetIds` — a list —
+  // with the single field left empty. So it was never found, the screen
+  // decided nothing had been sent, and offered the whole list again to
+  // somebody who had already sent it up.
+  //
+  // One document read, by an id worked out from the person and the date,
+  // so there is no query and no index behind it.
+  async function getDaySubFor(workerId, date){
+    if(!date) return null;
+    try{
+      const doc = await db.collection(SUBS_COLLECTION).doc(daySubId(workerId, date)).get();
+      return doc.exists ? doc.data() : null;
+    }catch(e){
+      console.error('Could not read the day:', e);
+      return null;   // null is "not known", and the screen stays cautious
+    }
+  }
   async function getDoListPoints(){
     const v = await getList(K_DOLIST_POINTS);
     const n = Number(v && v.points);
@@ -4190,7 +4208,10 @@
     // caller — see doListJobsFor — so only the day is worked out here.
     const live = liveDailyDate(today, mins);
     const jobs = myTargets;
-    const sub = mySubs.find(s => s.isDay && s.dayDate === (live || today));
+    // Read directly by the caller; the list of other submissions cannot
+    // contain it.
+    const sub = (ctx && ctx.daySub)
+      || mySubs.find(s => s.isDay && s.dayDate === (live || today));
     const st = sub ? sub.status : null;
     const dayPts = (ctx && ctx.dayPts) || DOLIST_DAY_POINTS_DEFAULT;
 
@@ -4214,6 +4235,12 @@
     // came back blank on the next open, and adding a one-off job to a day
     // already settled made the whole list look undone again.
     const isDone = j => j.status === 'achieved';
+    // Ticks live on screen until the day is settled, so reopening the app
+    // after sending it up showed every box empty under "waiting on your
+    // head". What was actually sent is on the submission, so that is what
+    // the ticks come from once it is gone from this device.
+    const sentIds = new Set(sub && sub.status === 'pending' ? (sub.targetIds || []) : []);
+    const ticked = j => isDone(j) || picked[j.id] || sentIds.has(j.id);
     const todo = jobs.filter(j => !isDone(j));
     const allDone = todo.length === 0;
     const open = todo.filter(j => !picked[j.id]).length;
@@ -4221,9 +4248,9 @@
     const locked = st === 'pending' || allDone;
 
     const row = j => `
-      <div class="do-row ${isDone(j) || picked[j.id] ? 'picked' : ''}" ${
+      <div class="do-row ${ticked(j) ? 'picked' : ''}" ${
         locked || isDone(j) ? '' : `data-dojob="${j.id}"`}>
-        <span class="do-tick">${isDone(j) || picked[j.id] ? '&#10003;' : ''}</span>
+        <span class="do-tick">${ticked(j) ? '&#10003;' : ''}</span>
         <div class="do-body">
           <div class="do-what">${escapeHtml(j.title)}${
             msFor(j) ? `<span class="do-bm" data-doms="${j.id}">BM</span>` : ''}</div>
@@ -4792,8 +4819,12 @@
     const doIds = new Set(doJobs.map(t => t.id));
     const listTargets = myTargets.filter(t => !doIds.has(t.id));
     if(isDoList(worker)){
+      const { dateStr: _dToday, minutesOfDay: _dMins } = nowMYParts();
+      const _liveDay = liveDailyDate(_dToday, _dMins);
+      const [dayPts, daySub] = await Promise.all([
+        getDoListPoints(), getDaySubFor(worker.id, _liveDay)]);
       renderDoListDay(document.getElementById('wp-dolist'), body, worker,
-        doJobs, mySubs, { dayPts: await getDoListPoints() });
+        doJobs, mySubs, { dayPts, daySub });
     }
     if(listTargets.length===0){
       tEl.innerHTML = isDoList(worker) ? '' :
