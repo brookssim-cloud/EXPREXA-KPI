@@ -648,7 +648,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-18e';
+  const APP_BUILD = '2026-11-19a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -3609,7 +3609,13 @@
       }catch(e){ console.error('Could not clear archived targets for worker:', e); }
 
       const targets = await getTargets();
-      const myQuestIds = new Set(targets.filter(t=>t.workerId===workerId && t.sideQuestId).map(t=>t.sideQuestId));
+      // How many places this worker held on each challenger task. Their
+      // copies are about to be deleted, which would hand every one of those
+      // places back to whoever taps Accept next — so it is worked out first.
+      const heldPlaces = {};
+      targets.forEach(t => { if(t.workerId===workerId && t.sideQuestId)
+        heldPlaces[t.sideQuestId] = (heldPlaces[t.sideQuestId] || 0) + 1; });
+      const myQuestIds = new Set(Object.keys(heldPlaces));
       // Only this worker's rows are removed, as a merge — writing the filtered
       // array back wholesale would take everyone else's list with it, undoing
       // any approval that landed while this was running.
@@ -3618,10 +3624,21 @@
       const fails = await getFails();
       await setFailsAndCounts(fails.filter(f=>f.workerId!==workerId));
 
+      // The places they held stay used. A one-person task closes; a task
+      // with several places loses exactly the ones they held, so others who
+      // had not yet claimed one can still do so. The owner can Reopen a
+      // closed one by hand if it really should go out again.
       if(myQuestIds.size > 0){
         await mutateSideQuests(list => {
           let changed = false;
-          list.forEach(q=>{ if(myQuestIds.has(q.id) && q.active===false){ q.active = true; changed = true; } });
+          list.forEach(q => {
+            if(!myQuestIds.has(q.id)) return;
+            const cap = q.capacity || 1;
+            const left = cap - heldPlaces[q.id];
+            if(left >= 1){ q.capacity = left; }
+            else { q.active = false; }
+            changed = true;
+          });
           return changed ? list : false;
         });
       }
@@ -8758,7 +8775,7 @@
         host.innerHTML = `
           <div style="margin-top:10px;padding:12px;background:#FBEAEA;border:1px solid var(--red);border-radius:8px;">
             <div style="font-size:12.5px;color:var(--red);font-weight:600;margin-bottom:6px;">Reset ${escapeHtml(w.name)}'s points and tasks?</div>
-            <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;">Wipes their points balance, every submission, every target (active, achieved, failed), and every recorded fail. Any challenger task they had claimed becomes available to others again. This only affects ${escapeHtml(w.name)} — nobody else is touched. Cannot be undone.</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;">Wipes their points balance, every submission, every target (active, achieved, failed), and every recorded fail. Any challenger task they had claimed stays taken — it is not offered to anyone else. This only affects ${escapeHtml(w.name)} — nobody else is touched. Cannot be undone.</div>
             <div style="display:flex;gap:8px;">
               <button class="btn btn-red btn-sm" data-reset-worker-confirm="${workerId}">Yes, reset this worker</button>
               <button class="btn btn-ghost btn-sm" data-reset-worker-cancel="${workerId}">Cancel</button>
