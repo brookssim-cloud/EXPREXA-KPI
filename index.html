@@ -648,7 +648,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-20g';
+  const APP_BUILD = '2026-11-20h';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -3071,7 +3071,9 @@
   // first time it is missing, and kept in step on every append, worker
   // reset and season reset. Hell Mode give-up penalties share the
   // 'redeemed' type but are not rewards.
-  const K_REDEMPTIONS = 'perf-redemptions';
+  // v2: rebuilt once from the full ledger, because the first copy missed a
+  // redemption recorded from a device still running an older build.
+  const K_REDEMPTIONS = 'perf-redemptions-v2';
   const isRewardRedemption = l => l && l.type === 'redeemed' && !/^Hell Mode/.test(l.note || '');
   const slimRedemption = l => ({ id: l.id, workerId: l.workerId, note: l.note || '', points: l.points || 0, date: l.date || '' });
   async function getRedemptions(){
@@ -3080,7 +3082,18 @@
     const ref = db.collection('appdata').doc(K_REDEMPTIONS);
     const doc = await ref.get();
     if(doc.exists){
-      const v = doc.data().value || [];
+      let v = doc.data().value || [];
+      // A phone or browser still on an older build writes the ledger but
+      // not this list. Anything like that lands in the live ledger, so
+      // check it — one small read — and add whatever is missing.
+      try{
+        const have = new Set(v.map(r => r.id));
+        const missing = (await getListStrict(K_LEDGER)).filter(l => isRewardRedemption(l) && !have.has(l.id));
+        if(missing.length){
+          await addRedemptions(missing);
+          v = v.concat(missing.map(slimRedemption));
+        }
+      }catch(e){ console.error('Could not check the redemptions list against the ledger:', e); }
       cachePut(K_REDEMPTIONS, v);
       return _copy(v);
     }
