@@ -648,7 +648,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-20a';
+  const APP_BUILD = '2026-11-20b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11922,8 +11922,10 @@
         <button class="btn btn-primary btn-block" id="r-redeem">Record Redemption</button>
         <div id="r-msg" style="margin-top:8px;font-size:12.5px;"></div>
       </div>
+      <div class="toprow"><h2>Reward redemptions</h2></div>
+      <div id="r-redeemed"></div>
       <div class="toprow"><h2>Points ledger</h2></div>
-      <select class="select-worker" id="r-filter"><option value="all">All workers</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select>
+      <select class="select-worker" id="r-filter"><option value="">— choose a worker to see their ledger —</option><option value="all">All workers</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select>
       <div id="r-list"></div>
       <div class="card" style="margin-top:14px;">
         <div class="eyebrow" style="margin-bottom:6px;">Balances look wrong?</div>
@@ -12183,10 +12185,32 @@
         document.getElementById('r-worker').value='';
         msg.style.color='var(--green)'; msg.textContent='Redemption recorded for ' + wName + '.';
         drawLedgerList(document.getElementById('r-filter').value, workers);
+        drawRedeemedList(workers);
       } else { msg.style.color='var(--red)'; msg.textContent='Could not save — try again.'; }
     };
     document.getElementById('r-filter').onchange = (e)=> drawLedgerList(e.target.value, workers);
-    await drawLedgerList('all', workers);
+    await drawLedgerList('', workers);
+    await drawRedeemedList(workers);
+  }
+  // Who claimed which reward, when, and what it cost. Hell Mode give-up
+  // penalties share the 'redeemed' ledger type but are not rewards.
+  async function drawRedeemedList(workers, page){
+    page = page || 0;
+    const el = document.getElementById('r-redeemed');
+    if(!el) return;
+    const ledger = await getLedger();
+    const wm = {}; workers.forEach(w=>wm[w.id]=w);
+    const rows = ledger.filter(l=>l.type==='redeemed' && !/^Hell Mode/.test(l.note||''))
+      .sort((a,b)=> (b.date||'').localeCompare(a.date||''));
+    if(rows.length===0){ el.innerHTML = `<div class="card"><div class="empty">No rewards redeemed yet.</div></div>`; return; }
+    const pageRows = rows.slice(page*PAGE_SIZE, (page+1)*PAGE_SIZE);
+    el.innerHTML = `<div class="card">` + pageRows.map(l=>{
+      const w = wm[l.workerId];
+      return `<div class="ledger-row"><div><div class="ledger-note"><strong>${escapeHtml(w?w.name:'Removed worker')}</strong></div>
+        <div class="ledger-date">${escapeHtml(l.note||'')} &middot; ${l.date||''}</div></div>
+        <div class="ledger-pts pts-redeem">-${l.points}</div></div>`;
+    }).join('') + `</div>` + pagerHtml(page, rows.length);
+    wirePager(el, page, rows.length, p => drawRedeemedList(workers, p));
   }
   function drawCatalogList(catalog){
     const el = document.getElementById('c-list');
@@ -12238,6 +12262,7 @@
   async function drawLedgerList(filterId, workers, page){
     page = page || 0;
     const listEl = document.getElementById('r-list');
+    if(!filterId){ listEl.innerHTML = `<div class="card"><div class="empty">Choose a worker above to see their points history.</div></div>`; return; }
     const ledger = await getLedger();
     const workerMap = {}; workers.forEach(w=>workerMap[w.id]=w);
     const filtered = filterId==='all' ? ledger : ledger.filter(l=>l.workerId===filterId);
