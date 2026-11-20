@@ -648,7 +648,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-20b';
+  const APP_BUILD = '2026-11-20c';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -2170,7 +2170,7 @@
         if(photo){
           slot.outerHTML = `<img class="${slot.dataset.cls}" src="${photo}" data-lightbox="${photo}" style="margin-top:10px;">`;
         }else{
-          slot.textContent = 'Photo not found — run "Move proof photos out of submissions" in Rewards';
+          slot.textContent = 'Photo not found';
         }
       }));
     }
@@ -11928,21 +11928,6 @@
       <select class="select-worker" id="r-filter"><option value="">— choose a worker to see their ledger —</option><option value="all">All workers</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select>
       <div id="r-list"></div>
       <div class="card" style="margin-top:14px;">
-        <div class="eyebrow" style="margin-bottom:6px;">Balances look wrong?</div>
-        <div class="help">Dashboards and leaderboards read a cached summary of this ledger so they don't have to download the whole history. The ledger above is always the source of truth — if a balance ever looks off, recompute the cache from it.</div>
-        <button class="btn btn-ghost btn-block" id="r-rebuild">Rebuild totals from ledger</button>
-        <div id="r-rebuild-msg" style="margin-top:8px;font-size:12.5px;"></div>
-        <div class="help" style="margin-top:12px;">Scoring uses running submission tallies kept up to date as work comes in. If Quality or timing figures ever look wrong, recount them from the submissions themselves.</div>
-        <button class="btn btn-ghost btn-block" id="r-rebuild-stats">Recount submission statistics</button>
-        <div id="r-rebuild-stats-msg" style="margin-top:8px;font-size:12.5px;"></div>
-      </div>
-      <div class="card" style="margin-top:14px;">
-        <div class="eyebrow" style="margin-bottom:6px;">Speed up loading</div>
-        <div class="help">Proof photos used to be stored inside each submission, so screens that read submissions — Review, Log, Scores — downloaded every photo even when not showing them. Move them into their own storage; the photos stay available and load when displayed.</div>
-        <button class="btn btn-ghost btn-block" id="r-split-photos">Move proof photos out of submissions</button>
-        <div id="r-split-msg" style="margin-top:8px;font-size:12.5px;"></div>
-      </div>
-      <div class="card" style="margin-top:14px;">
         <div class="eyebrow" style="margin-bottom:6px;">Task failed by mistake?</div>
         <div class="help">If a submission never went through and the deadline passed before anyone noticed, bring the task back. The fail record is cleared and the task reopens with a fresh deadline — a daily until 5am tomorrow morning, a weekly by Sunday, a challenger task for another 24 hours. Points are not touched.</div>
         <button class="btn btn-ghost btn-block" id="r-revive-load">Show failed tasks</button>
@@ -12059,60 +12044,6 @@
       }
       this.disabled = false; this.textContent = 'Refresh list';
     };
-    document.getElementById('r-split-photos').onclick = async function(){
-      this.disabled = true; this.textContent = 'Moving…';
-      const msg = document.getElementById('r-split-msg');
-      try{
-        const snap = await db.collection(SUBS_COLLECTION).get();
-        let moved = 0;
-        for(const d of snap.docs){
-          const data = d.data();
-          if(!data.photo) continue;
-          await db.collection(SUB_PHOTOS).doc(d.id).set({ photo: data.photo });
-          const { photo, ...meta } = data;
-          meta.hasPhoto = true;
-          await db.collection(SUBS_COLLECTION).doc(d.id).set(meta);
-          moved++;
-        }
-        msg.style.color = 'var(--green)';
-        msg.textContent = moved
-          ? `Moved ${moved} photo(s). Review, Log and Scores will load faster now.`
-          : 'Nothing to move — already done.';
-      }catch(e){
-        msg.style.color = 'var(--red)';
-        msg.textContent = 'Could not finish: ' + e.message;
-      }
-      this.disabled = false; this.textContent = 'Move proof photos out of submissions';
-    };
-
-    document.getElementById('r-rebuild-stats').onclick = async function(){
-      this.disabled = true; this.textContent = 'Recounting…';
-      const msg = document.getElementById('r-rebuild-stats-msg');
-      try{
-        const st = await rebuildSubStats();
-        msg.style.color = 'var(--green)';
-        msg.textContent = `Recounted for ${Object.keys(st.byWorker).length} worker(s).`;
-      }catch(e){
-        msg.style.color = 'var(--red)';
-        msg.textContent = 'Recount failed: ' + e.message;
-      }
-      this.disabled = false; this.textContent = 'Recount submission statistics';
-    };
-
-    document.getElementById('r-rebuild').onclick = async function(){
-      this.disabled = true; this.textContent = 'Rebuilding…';
-      const msg = document.getElementById('r-rebuild-msg');
-      try{
-        const t = await rebuildTotals();
-        msg.style.color = 'var(--green)';
-        msg.textContent = `Rebuilt from ${t.entryCount} ledger entries across ${Object.keys(t.byWorker).length} worker(s).`;
-      }catch(e){
-        msg.style.color = 'var(--red)';
-        msg.textContent = 'Rebuild failed: ' + e.message;
-      }
-      this.disabled = false; this.textContent = 'Rebuild totals from ledger';
-    };
-
     document.getElementById('ah-save').onclick = async function(){
       const msg = document.getElementById('ah-set-msg');
       const pts = parseInt(document.getElementById('ah-pts').value, 10);
@@ -12203,14 +12134,15 @@
     const rows = ledger.filter(l=>l.type==='redeemed' && !/^Hell Mode/.test(l.note||''))
       .sort((a,b)=> (b.date||'').localeCompare(a.date||''));
     if(rows.length===0){ el.innerHTML = `<div class="card"><div class="empty">No rewards redeemed yet.</div></div>`; return; }
-    const pageRows = rows.slice(page*PAGE_SIZE, (page+1)*PAGE_SIZE);
+    const REDEEM_PAGE = 20;
+    const pageRows = rows.slice(page*REDEEM_PAGE, (page+1)*REDEEM_PAGE);
     el.innerHTML = `<div class="card">` + pageRows.map(l=>{
       const w = wm[l.workerId];
       return `<div class="ledger-row"><div><div class="ledger-note"><strong>${escapeHtml(w?w.name:'Removed worker')}</strong></div>
         <div class="ledger-date">${escapeHtml(l.note||'')} &middot; ${l.date||''}</div></div>
         <div class="ledger-pts pts-redeem">-${l.points}</div></div>`;
-    }).join('') + `</div>` + pagerHtml(page, rows.length);
-    wirePager(el, page, rows.length, p => drawRedeemedList(workers, p));
+    }).join('') + `</div>` + pagerHtml(page, rows.length, REDEEM_PAGE);
+    wirePager(el, page, rows.length, p => drawRedeemedList(workers, p), REDEEM_PAGE);
   }
   function drawCatalogList(catalog){
     const el = document.getElementById('c-list');
@@ -12238,11 +12170,12 @@
   // a time. Everything stays in memory — this only limits what's drawn, so
   // paging is instant and doesn't re-hit Firestore.
   const PAGE_SIZE = 50;
-  function pagerHtml(page, total){
-    if(total <= PAGE_SIZE) return '';
-    const pages = Math.ceil(total / PAGE_SIZE);
-    const from = page * PAGE_SIZE + 1;
-    const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  function pagerHtml(page, total, size){
+    size = size || PAGE_SIZE;
+    if(total <= size) return '';
+    const pages = Math.ceil(total / size);
+    const from = page * size + 1;
+    const to = Math.min(total, (page + 1) * size);
     return `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;">
         <button class="btn btn-ghost btn-sm" data-pager="prev" ${page === 0 ? 'disabled' : ''}>&lsaquo; Prev</button>
@@ -12250,9 +12183,9 @@
         <button class="btn btn-ghost btn-sm" data-pager="next" ${page >= pages - 1 ? 'disabled' : ''}>Next &rsaquo;</button>
       </div>`;
   }
-  function wirePager(scopeEl, page, total, go){
+  function wirePager(scopeEl, page, total, go, size){
     if(!scopeEl) return;
-    const pages = Math.ceil(total / PAGE_SIZE);
+    const pages = Math.ceil(total / (size || PAGE_SIZE));
     const prev = scopeEl.querySelector('[data-pager="prev"]');
     const next = scopeEl.querySelector('[data-pager="next"]');
     if(prev) prev.onclick = ()=>{ if(page > 0) go(page - 1); };
