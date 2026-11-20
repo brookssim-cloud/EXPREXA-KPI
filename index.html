@@ -648,7 +648,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-19a';
+  const APP_BUILD = '2026-11-20a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11913,7 +11913,7 @@
       <div class="card">
         <h3>Redeem points</h3>
         <div class="help">Record when a worker exchanges points for a real prize or bonus. This deducts from their balance.</div>
-        <div class="field"><label>Worker</label><select id="r-worker">${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Worker</label><select id="r-worker"><option value="">— choose worker —</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select></div>
         ${catalog.length>0 ? `<div class="field"><label>Quick-pick from catalog</label><select id="r-quickpick"><option value="">— choose a reward —</option>${catalog.map(c=>`<option value="${c.id}" data-name="${escapeHtml(c.name)}" data-cost="${c.pointsCost}">${escapeHtml(c.name)} (${c.pointsCost} pts)</option>`).join('')}</select></div>` : ''}
         <div class="row2">
           <div class="field"><label>Prize / bonus</label><input type="text" id="r-prize" placeholder="e.g. RM50 voucher"></div>
@@ -12167,7 +12167,11 @@
       const prize = document.getElementById('r-prize').value.trim();
       const cost = parseInt(document.getElementById('r-cost').value, 10);
       const msg = document.getElementById('r-msg');
+      if(!workerId){ msg.style.color='var(--red)'; msg.textContent='Choose the worker first.'; return; }
       if(!prize || !cost || cost<=0){ msg.style.color='var(--red)'; msg.textContent='Please fill in a prize name and valid points cost.'; return; }
+      const wSel = document.getElementById('r-worker');
+      const wName = wSel.selectedOptions[0] ? wSel.selectedOptions[0].textContent : '';
+      if(!confirm('Redeem ' + prize + ' (' + cost + ' pts) for ' + wName + '?')) return;
       const tot = await getTotalsEnsured();
       const bal = tot ? ((tot.byWorker[workerId]||{}).balance || 0) : balanceFor(await getLedger(), workerId);
       if(cost > bal){ msg.style.color='var(--red)'; msg.textContent=`Not enough balance (has ${bal} pts).`; return; }
@@ -12176,7 +12180,8 @@
       this.disabled = false; this.textContent = 'Record Redemption';
       if(ok){
         document.getElementById('r-prize').value=''; document.getElementById('r-cost').value='';
-        msg.style.color='var(--green)'; msg.textContent='Redemption recorded.';
+        document.getElementById('r-worker').value='';
+        msg.style.color='var(--green)'; msg.textContent='Redemption recorded for ' + wName + '.';
         drawLedgerList(document.getElementById('r-filter').value, workers);
       } else { msg.style.color='var(--red)'; msg.textContent='Could not save — try again.'; }
     };
