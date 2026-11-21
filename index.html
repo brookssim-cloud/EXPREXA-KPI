@@ -569,6 +569,15 @@
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+  // App Check proves each request comes from this page, not from a script
+  // somewhere else using the project's public settings. Loaded only next to
+  // the real Firebase SDK (the test harness swaps in a stand-in without it).
+  if(window.firebase && firebase.SDK_VERSION){
+    // Same CDN and version as the two scripts above, taken from the loaded SDK.
+    document.write('<script src="https://www.gstatic.com/' + 'firebasejs/' + firebase.SDK_VERSION + '/firebase-app-check-compat.js"><\/script>');
+  }
+</script>
 </head>
 <body>
 <div id="root"></div>
@@ -636,6 +645,34 @@
     appId: "1:771580972778:web:8ed919d1562754a3935193"
   };
   firebase.initializeApp(firebaseConfig);
+  // Fraud Defense (reCAPTCHA Enterprise) key — public by design; classic
+  // reCAPTCHA v3 is retired for App Check. Until App Check is enforced in
+  // the Firebase console this only reports; a failure here must never stop
+  // the app from loading.
+  const APP_CHECK_SITE_KEY = '6LeGLCsuAAAAAGn2ntEwv0FEnTycBwJC6cAJFiND';
+  //
+  // Safety catch: if reCAPTCHA cannot load at all (an ad blocker, a network
+  // that blocks google.com/recaptcha, an old TV browser), the Firebase SDK
+  // waits for it forever and the app never reaches the database. So if no
+  // App Check answer arrives within 8 seconds, reload once without it for
+  // the rest of this browser session. Before enforcement nothing is lost;
+  // after it, that device is refused, which is the point — and it shows in
+  // App Check's numbers during the watch period first.
+  (function startAppCheck(){
+    let skip = false;
+    try{ skip = sessionStorage.getItem('perf_skip_appcheck') === '1'; }catch(e){}
+    if(skip || !firebase.appCheck){ if(skip) console.warn('App Check skipped this session: reCAPTCHA did not load.'); return; }
+    try{
+      firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider(APP_CHECK_SITE_KEY), true);
+      let settled = false;
+      firebase.appCheck().getToken(false).then(() => { settled = true; }, () => { settled = true; });
+      setTimeout(() => {
+        if(settled) return;
+        try{ sessionStorage.setItem('perf_skip_appcheck', '1'); }catch(e){ return; }
+        location.reload();
+      }, 8000);
+    }catch(e){ console.error('App Check could not start:', e); }
+  })();
   const db = firebase.firestore();
 </script>
 
@@ -648,7 +685,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-20h';
+  const APP_BUILD = '2026-11-21b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
