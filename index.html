@@ -689,7 +689,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-22a';
+  const APP_BUILD = '2026-11-22b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11633,8 +11633,24 @@
     const c = r.counts;
     const mine = (ledger || []).filter(l => l.workerId === w.id);
     const pointsEarned = mine.filter(l => l.type === 'earned').reduce((s,l) => s + (l.points||0), 0);
-    const pointsRedeemed = mine.filter(l => l.type === 'redeemed' && !/^Hell Mode/.test(l.note || ''))
-      .reduce((s,l) => s + (l.points||0), 0);
+    const rewards = mine.filter(l => l.type === 'redeemed' && !/^Hell Mode/.test(l.note || '') && inP(l.date));
+    const pointsRedeemed = rewards.reduce((s,l) => s + (l.points||0), 0);
+    // Money: read from the reward's name ("RM10", "RM50 voucher"). A reward
+    // named without an RM amount is counted separately, never guessed.
+    let rmRedeemed = 0, rewardsUnpriced = 0;
+    rewards.forEach(l => {
+      const mm = /RM\s*([\d,]+(?:\.\d+)?)/i.exec(l.note || '');
+      if(mm) rmRedeemed += Number(mm[1].replace(/,/g, '')) || 0; else rewardsUnpriced++;
+    });
+    // The most points held at any one time: the running balance, in the order
+    // things happened, at its highest. Hell Mode penalties come off it too,
+    // as they do in the app.
+    let running = 0, peakBalance = 0;
+    mine.slice().sort((a,b) => String(a.at || a.date || '').localeCompare(String(b.at || b.date || '')))
+      .forEach(l => {
+        running += (l.type === 'earned' ? 1 : -1) * (l.points || 0);
+        if(inP(l.date) && running > peakBalance) peakBalance = running;
+      });
     const head = w.reportsTo && ctx.workers ? (ctx.workers.find(x => x.id === w.reportsTo) || {}).name || '' : '';
 
     // Challenger tasks are left out of both fail lists for the same reason
@@ -11674,7 +11690,7 @@
       workerId: w.id, name: w.name || '', role: w.role || '', head,
       rank, total,
       score: r.score, exact: r.exact, parts: r.parts, counts: c,
-      pointsEarned, pointsRedeemed,
+      pointsEarned, pointsRedeemed, peakBalance, rmRedeemed, rewardsUnpriced,
       pos: positionChanges(w, ctx.targets, ctx.templates),
       notSubmitted: myFails.filter(f => f.failKind !== 'rejected').map(failRow),
       notFixed: myFails.filter(f => f.failKind === 'rejected').map(failRow),
@@ -11775,6 +11791,11 @@
           <div class="rep-stat"><div class="n">${c.challengerDone}/${c.challengerAccepted}</div><div class="l">Challenger<br>completed</div></div>
           <div class="rep-stat"><div class="n">${c.submissions}</div><div class="l">Submissions<br>made</div></div>
           <div class="rep-stat"><div class="n">${m.pointsEarned}</div><div class="l">Points<br>earned</div></div>
+        </div>
+        <div class="rep-stats" style="margin-top:8px;">
+          <div class="rep-stat"><div class="n">${m.peakBalance != null ? m.peakBalance : '—'}</div><div class="l">Highest points<br>balance held</div></div>
+          <div class="rep-stat"><div class="n">${m.pointsRedeemed != null ? m.pointsRedeemed : '—'}</div><div class="l">Points<br>redeemed</div></div>
+          <div class="rep-stat"><div class="n" style="color:var(--green);">${m.rmRedeemed != null ? 'RM' + m.rmRedeemed.toLocaleString() : '—'}</div><div class="l">Money<br>redeemed${m.rewardsUnpriced ? ` <span style="color:var(--muted);">(+${m.rewardsUnpriced} not in RM)</span>` : ''}</div></div>
         </div>
         ${c.afterHours ? `<div class="rep-stats" style="margin-top:8px;">
           <div class="rep-stat"><div class="n" style="color:var(--amber-dark);">${c.afterHours}</div>
@@ -11920,7 +11941,7 @@
       for(const m of models) await saveDoc(seasonWorkerKey(id, m.workerId), m);
       const rows = models.map(m => ({ workerId: m.workerId, name: m.name, role: m.role, head: m.head,
         rank: m.rank, score: m.score, exact: m.exact, parts: m.parts, counts: m.counts,
-        pointsEarned: m.pointsEarned, pointsRedeemed: m.pointsRedeemed }));
+        pointsEarned: m.pointsEarned, pointsRedeemed: m.pointsRedeemed, peakBalance: m.peakBalance, rmRedeemed: m.rmRedeemed }));
       const closedAt = new Date().toISOString();
       await saveDoc(seasonDocKey(id), { id, name: info.name, start: info.start, end: info.end,
         closedAt, closedBy: currentAdminName() || '', rows });
@@ -12098,11 +12119,11 @@
     document.getElementById('se-rep-all').onclick = () => openReports(rows.map(r => r.workerId));
     document.getElementById('se-csv').onclick = () => downloadCsv(`season-${id}.csv`,
       ['Rank','Worker','Role','Head','Score','Reliability','Quality','Challenger','Daily done','Daily given',
-       'Challenger done','Challenger taken','Not submitted','Rejected','Quality issues','After-hours','Points earned','Points redeemed'],
+       'Challenger done','Challenger taken','Not submitted','Rejected','Quality issues','After-hours','Points earned','Highest balance','Points redeemed','RM redeemed'],
       rows.map(r => { const c = r.counts || {}; return [r.rank, r.name, r.role, r.head, scorePct(seasonScoreOf(r)),
         fmtPart(r.parts && r.parts.reliability), fmtPart(r.parts && r.parts.quality), fmtPart(r.parts && r.parts.challenger),
         c.dailyDone, c.dailyAssigned, c.challengerDone, c.challengerAccepted, c.fails, c.rejected, c.issues || 0,
-        c.afterHours || 0, r.pointsEarned, r.pointsRedeemed]; }));
+        c.afterHours || 0, r.pointsEarned, r.peakBalance, r.pointsRedeemed, r.rmRedeemed]; }));
   }
 
   // The average of the seasons each person was there for — someone who
