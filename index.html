@@ -689,7 +689,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-21d';
+  const APP_BUILD = '2026-11-22a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11576,21 +11576,38 @@
   // all season, while finished tasks only keep their detail for 30 days.
   // Awards recorded before the ledger carried a tag are found from the
   // tasks still on file.
-  function challengerDoneList(w, ledger, targets, inP){
-    const out = [], seenTargets = new Set();
+  //
+  // Awards from before the tag existed carry only the task's name. Those are
+  // recognised by matching the name against every challenger task name still
+  // known: the challenger list, every task record and every missed-task
+  // record. A challenger task that was removed and whose records have since
+  // been rolled up cannot be named; the report says how many are left out.
+  function challengerDoneList(w, ledger, targets, inP, questTitles){
+    const out = [], seenTargets = new Set(), seenKeys = new Set();
+    const titles = questTitles || new Set();
     (ledger || []).forEach(l => {
-      if(l.workerId !== w.id || l.type !== 'earned' || l.kind !== 'challenger' || !inP(l.date)) return;
+      if(l.workerId !== w.id || l.type !== 'earned' || !inP(l.date)) return;
+      const tagged = l.kind === 'challenger';
+      if(!tagged && (l.kind || !titles.has(l.note) || /^Hell Mode/.test(l.note || ''))) return;
       if(l.targetId) seenTargets.add(l.targetId);
+      seenKeys.add(l.note + '|' + l.date);
       out.push({ what: l.note, when: l.date, pts: l.points || 0 });
     });
     (targets || []).forEach(t => {
       if(t.workerId !== w.id || !t.sideQuestId || t.status !== 'achieved' || t.standIn) return;
       if(seenTargets.has(t.id)) return;
       const d = dayOf(t.achievedAt);
-      if(!inP(d)) return;
+      if(!inP(d) || seenKeys.has(t.title + '|' + d)) return;
       out.push({ what: t.title, when: d, pts: t.points || 0 });
     });
     return out.sort((a,b) => String(a.when).localeCompare(String(b.when)));
+  }
+  function challengerTitlesFrom(ctx){
+    const s = new Set();
+    (ctx.sideQuests || []).forEach(q => { if(q && q.title) s.add(q.title); });
+    (ctx.targets || []).forEach(t => { if(t && t.sideQuestId && t.title) s.add(t.title); });
+    (ctx.fails || []).forEach(f => { if(f && f.type === 'sidequest' && f.title) s.add(f.title); });
+    return s;
   }
   // Hell Mode, from the ledger: what was solved, helped with or given up,
   // and what it paid or cost. A speed bonus is folded into its award.
@@ -11663,7 +11680,7 @@
       notFixed: myFails.filter(f => f.failKind === 'rejected').map(failRow),
       rejects: myRejects,
       issues,
-      challengers: challengerDoneList(w, ledger, ctx.targets, inP),
+      challengers: challengerDoneList(w, ledger, ctx.targets, inP, challengerTitlesFrom(ctx)),
       hell: hellList(w, ledger, inP),
       period: ctx.cutoffDate ? 'period' : 'season'
     };
@@ -11696,12 +11713,17 @@
         + 'what someone recorded.');
     const nothingAgainst = detail === '' && m.rejects !== null;
     const chal = (m.challengers || []).map(x => ({ what: x.what, when: x.when, extra: '+' + x.pts + ' pts' }));
+    const chalMissing = Math.max(0, (c.challengerDone || 0) - chal.length);
     const hell = (m.hell || []).map(x => ({ what: x.what,
       why: x.outcome + (x.bonus ? ' — includes the speed bonus' : ''),
       when: x.when, extra: (x.pts >= 0 ? '+' : '−') + Math.abs(x.pts) + ' pts' }));
     const extraWork =
       repList('Challenger tasks completed', 'var(--green)', chal, 'Points',
-        'Every challenger task finished and approved, with what it paid.')
+        chalMissing
+          ? `Challenger tasks finished and approved, with what each paid. ${c.challengerDone} were completed; `
+            + `${chalMissing} older one${chalMissing===1?' is':'s are'} counted in the figures above but cannot be named, `
+            + `because the task was removed and its details have since been rolled up.`
+          : 'Every challenger task finished and approved, with what it paid.')
       + repList('Hell Mode', 'var(--red)', hell, 'Points',
         'Problems solved, helped with or given up. Giving up costs the penalty set on the problem.');
     return `
@@ -11801,6 +11823,7 @@
     if(!_reportLedger) _reportLedger = await getLedger();
     const ledger = _reportLedger;
     const rejections = await getReportRejections();
+    if(!ctx.sideQuests){ try{ ctx = Object.assign({}, ctx, { sideQuests: await getSideQuests() }); }catch(e){} }
     const list = onlyWorkerId ? rows.filter(x=>x.w.id === onlyWorkerId) : rows;
     const rankOf = {}; rows.forEach((x,i)=>{ rankOf[x.w.id] = i+1; });
     const pages = list.map(({w,r}) =>
@@ -11870,15 +11893,15 @@
   // and its report would show it today for the whole season.
   async function buildSeasonSnapshot(){
     cacheDrop();
-    const [workers, targets, fails, archive, issues, stats, roleTemplates, ledger] = await Promise.all([
+    const [workers, targets, fails, archive, issues, stats, roleTemplates, ledger, sideQuests] = await Promise.all([
       getWorkers(), getTargets(), getFails(), getTargetArchive(), getQualityIssues(), getSubStats(),
-      getList(K_ROLE_TEMPLATES), getLedger()
+      getList(K_ROLE_TEMPLATES), getLedger(), getSideQuests()
     ]);
     // Read fresh, never from the session copy, and a failure stops the close:
     // a record saying "never rejected" because a read failed is worse than none.
     const rsnap = await db.collection(SUBS_COLLECTION).where('status','==','rejected').get();
     const rejections = rsnap.docs.map(d => d.data());
-    const ctx = { targets, templates: roleTemplates, fails, issues, cutoffDate: null, workers };
+    const ctx = { targets, templates: roleTemplates, fails, issues, cutoffDate: null, workers, sideQuests };
     const rows = workers
       .map(w => ({ w, r: scoreWorker(w.id, { targets, fails, stats, cutoffDate: null, archive, issues, modes: modesOf(workers) }) }))
       .filter(x => x.r)
