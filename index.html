@@ -689,7 +689,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-22b';
+  const APP_BUILD = '2026-11-22d';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -2350,9 +2350,19 @@
   // Always by name. Sorted here rather than at each screen because there are
   // a dozen dropdowns and lists built from this, and one of them being in
   // the order people happened to be added is the one you are hunting through.
-  async function getWorkers(){
+  // Everyone on record, disabled accounts included. Anything that writes
+  // the worker list back MUST start from this, or disabled people would be
+  // dropped from the database. Also used wherever a name is needed for
+  // history (review queue, logs, the points ledger).
+  async function getAllWorkers(){
     return (await getList(K_WORKERS)).slice()
       .sort((a, b) => String(a && a.name || '').localeCompare(String(b && b.name || '')));
+  }
+  // The people currently working here. A disabled account (someone who left
+  // part way through a season) is left out, so it drops off every board,
+  // ranking, picker, task list and login, while its points history stays.
+  async function getWorkers(){
+    return (await getAllWorkers()).filter(w => w && !w.disabled);
   }
   // ---- Where finished work lives ----
   //
@@ -3911,6 +3921,47 @@
   }
   // Everything resetWorker() does, plus the worker record itself — name, PIN,
   // role, join date, all of it. Completely irreversible.
+  // Disable / enable. Always starts from the full list and changes one
+  // person, so nobody else's record is touched.
+  async function setWorkerDisabled(workerId, disabled){
+    try{
+      const all = await getAllWorkers();
+      const w = all.find(x => x.id === workerId);
+      if(!w) return false;
+      if(disabled){
+        w.disabled = true; w.disabledAt = todayStr(); w.disabledBy = currentAdminName() || '';
+        // Their team's reviews fall back to admin rather than waiting on
+        // someone who can no longer log in.
+        all.forEach(x => { if(x.reportsTo === workerId) x.reportsTo = null; });
+      } else {
+        delete w.disabled; delete w.disabledAt; delete w.disabledBy;
+      }
+      return await setList(K_WORKERS, all);
+    }catch(e){
+      showFbError('Could not change this account: ' + e.message);
+      return false;
+    }
+  }
+  async function disableWorker(workerId){
+    const ok = await setWorkerDisabled(workerId, true);
+    if(!ok) return false;
+    // Open daily and weekly tasks they have not sent in would only turn into
+    // fails at the deadline. Challenger places they hold stay taken, the
+    // same as when a worker is reset.
+    try{
+      // Strict reads: a failed read must skip the clean-up, never make sent
+      // work look unsent.
+      const [targets, pending] = await Promise.all([getListStrict(K_TARGETS), getPendingSubsStrict()]);
+      const sent = new Set();
+      pending.forEach(s => { if(s.targetId) sent.add(s.targetId); (s.targetIds || []).forEach(id => sent.add(id)); });
+      const drop = targets.filter(t => t.workerId === workerId && t.status !== 'achieved'
+        && !t.sideQuestId && !sent.has(t.id)).map(t => t.id);
+      if(drop.length) await applyTargetDeltas({ removeIds: drop });
+    }catch(e){ console.error('Could not clear their open tasks:', e); }
+    const w = (await getAllWorkers()).find(x => x.id === workerId);
+    adminLog('Disabled a worker account', (w && w.name) || workerId);
+    return true;
+  }
   async function deleteWorkerCompletely(workerId){
     // Read the name before anything is removed — afterwards there is
     // nothing left to name them by.
@@ -3938,7 +3989,7 @@
         }
       });
       if(changed) await setHellIssues(issues);
-      const workers = await getWorkers();
+      const workers = await getAllWorkers();
       await setList(K_WORKERS, workers.filter(w=>w.id!==workerId));
       return true;
     }catch(e){
@@ -3998,7 +4049,7 @@
       await setList(K_ROLES, custom);
     }
 
-    const workers = await getWorkers();
+    const workers = await getAllWorkers();
     let workersChanged = false;
     workers.forEach(w=>{ if(w.role===oldName){ w.role=newName; workersChanged=true; } });
     if(workersChanged) await setList(K_WORKERS, workers);
@@ -4012,7 +4063,7 @@
   }
   async function removeRole(name){
     if(name==='Other') return { ok:false, reason:'protected' };
-    const workers = await getWorkers();
+    const workers = await getAllWorkers();
     const inUseCount = workers.filter(w=>w.role===name).length;
     if(inUseCount > 0) return { ok:false, reason:'in-use', count: inUseCount };
 
@@ -4146,6 +4197,8 @@
       showFbError('Could not load data from Firebase — daily tasks were not updated this load: ' + e.message);
       return;
     }
+    // A disabled account gets no new tasks and no new fails.
+    workers = workers.filter(w => w && !w.disabled);
     const dismissedKeys = new Set(dismissed.map(d=> d.workerId + '::' + d.templateId));
     const newFails = [];
     const library = templates; // role-template list is now plain admin-managed data — no auto re-seeding
@@ -4461,6 +4514,11 @@
       library.forEach(t => { roleByTemplate[t.id] = t.role; ownerByTemplate[t.id] = t.workerId || null; });
       targets.forEach(t => {
         if(!t.isDaily || !t.templateId || t.status !== 'active') return;
+        // Work already sent up (a single task, or a job in a Do list day
+        // waiting for review) is left for the reviewer, as every other
+        // clean-up here does. Removing it used to leave the head a Do list
+        // day whose jobs were "no longer on file".
+        if(t.everSubmitted || pendingTargetIds.has(t.id)) return;
         // A task given to one person by name is not role work, so a change
         // of role must not sweep it away. Without this, moving someone to a
         // new role would silently delete the very tasks that were made
@@ -7634,7 +7692,7 @@
     const el = document.getElementById('view-reminders');
     if(!el) return;
     el.innerHTML = `<div class="empty">Loading…</div>`;
-    const [workers, live] = await Promise.all([getWorkers(), getAdminAnnouncements()]);
+    const [workers, live] = await Promise.all([getAllWorkers(), getAdminAnnouncements()]);
     const sorted = workers.slice().sort((a,b)=> String(a.name||'').localeCompare(String(b.name||'')));
 
     el.innerHTML = `
@@ -8617,7 +8675,7 @@
         // Leave no worker pointing at an account that is gone, or their
         // submissions would sit in a queue nobody can select.
         if(owed){
-          const all = await getWorkers();
+          const all = await getAllWorkers();
           all.forEach(w => { if(w.approverAdminId === id) w.approverAdminId = null; });
           await setList(K_WORKERS, all);
         }
@@ -8798,7 +8856,7 @@
   // ---- Workers ----
   async function renderWorkers(){
     const el = document.getElementById('view-workers');
-    const [roles, existingWorkers] = await Promise.all([getRoles(), getWorkers()]);
+    const [roles, existingWorkers] = await Promise.all([getRoles(), getAllWorkers()]);
     const heads = existingWorkers.filter(w=>w.isHead);
     el.innerHTML = `
       <div class="card">
@@ -8906,7 +8964,7 @@
       if(!password) password = genPin();
       this.disabled = true; this.textContent = 'Adding…';
       const passwordHash = await sha256Hex(password);
-      const workers = await getWorkers();
+      const workers = await getAllWorkers();
       workers.push({id: uid(), name, role, employmentType, passwordHash, joined, isHead, reportsTo});
       adminLog('Added a worker', name + ' · ' + role);
       const ok = await setList(K_WORKERS, workers);
@@ -8944,7 +9002,7 @@
   async function drawRolesList(){
     const el = document.getElementById('role-list');
     if(!el) return;
-    const [allRoles, workers] = await Promise.all([getRoles(), getWorkers()]);
+    const [allRoles, workers] = await Promise.all([getRoles(), getAllWorkers()]);
     const query = (document.getElementById('role-search').value || '').trim().toLowerCase();
     const roles = query ? allRoles.filter(r=>r.toLowerCase().includes(query)) : allRoles;
     if(roles.length===0){ el.innerHTML = `<div class="help" style="margin-bottom:0;">No roles match "${escapeHtml(query)}".</div>`; return; }
@@ -9005,7 +9063,7 @@
   }
   async function drawWorkerList(){
     const listEl = document.getElementById('w-list');
-    const [allWorkers, totals, failCounts, roles, qualityIssues] = await Promise.all([getWorkers(), getTotalsEnsured(), getFailCountsEnsured(), getRoles(), getQualityIssues()]);
+    const [allWorkers, totals, failCounts, roles, qualityIssues] = await Promise.all([getAllWorkers(), getTotalsEnsured(), getFailCountsEnsured(), getRoles(), getQualityIssues()]);
     const ledger = totals ? null : await getLedger();
     if(allWorkers.length===0){ listEl.innerHTML = `<div class="card"><div class="empty">No workers yet.</div></div>`; return; }
     const query = (document.getElementById('w-search').value || '').trim().toLowerCase();
@@ -9015,7 +9073,7 @@
     const workers = (query
       ? allWorkers.filter(w=>w.name.toLowerCase().includes(query))
       : allWorkers.slice())
-      .sort((a,b)=> String(a.name||'').localeCompare(String(b.name||''), undefined,
+      .sort((a,b)=> (!!a.disabled - !!b.disabled) || String(a.name||'').localeCompare(String(b.name||''), undefined,
         { sensitivity:'base', numeric:true }));
     if(workers.length===0){ listEl.innerHTML = `<div class="empty">No worker IDs match "${escapeHtml(query)}".</div>`; return; }
     const failCountFor = id => failCounts ? ((failCounts.byWorker||{})[id] || 0) : 0;
@@ -9025,7 +9083,7 @@
       const bal = totals ? ((totals.byWorker[w.id]||{}).balance || 0) : balanceFor(ledger, w.id);
       const empLabel = { fulltime:'Full Time', parttime:'Part Time', contract:'Contract' }[w.employmentType] || 'Full Time';
       const myFailCount = failCountFor(w.id);
-      const teamSize = allWorkers.filter(x=>x.reportsTo===w.id).length;
+      const teamSize = allWorkers.filter(x=>x.reportsTo===w.id && !x.disabled).length;
       const headLine = w.isHead
         ? `<div style="font-size:11px;color:var(--amber-dark);font-weight:600;margin-top:2px;">👤 Head &middot; ${teamSize} report${teamSize===1?'':'s'}</div>`
         : (w.reportsTo && nameById[w.reportsTo]
@@ -9035,6 +9093,23 @@
             : (w.approverAdminId && adminNameById(w.approverAdminId)
                 ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;">Approved by ${escapeHtml(adminNameById(w.approverAdminId))}</div>`
                 : ''));
+      if(w.disabled){
+        // Left part way through: kept on record with their points history,
+        // but out of every board, list and login until switched back on.
+        return `<div class="worker-card" style="opacity:.75;background:#F4F5F7;"><div class="worker-head">
+          <div><div class="worker-name">${escapeHtml(w.name)} <span style="font-size:10.5px;font-weight:700;color:#fff;background:#6B7280;border-radius:6px;padding:2px 7px;vertical-align:middle;">DISABLED</span></div>
+            <div class="worker-role">${escapeHtml(w.role||'—')} &middot; ${empLabel} &middot; joined ${w.joined}${w.disabledAt ? ` &middot; disabled ${escapeHtml(w.disabledAt)}` : ''}${w.disabledBy ? ' by ' + escapeHtml(w.disabledBy) : ''}</div></div>
+          <div class="worker-balance">${bal} pts</div></div>
+          <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm" data-enable-worker="${w.id}">Enable account</button>
+            <button class="btn btn-red btn-sm" data-delete-worker="${w.id}">Delete Worker</button>
+            ${myFailCount>0 ? `<button class="btn btn-ghost btn-sm" data-view-fails="${w.id}">View Fails (${myFailCount})</button>` : ''}
+            <div id="reset-msg-${w.id}" style="font-size:11.5px;"></div>
+          </div>
+          <div id="delete-worker-form-${w.id}"></div>
+          <div id="fails-list-${w.id}"></div>
+          </div>`;
+      }
       return `<div class="worker-card"><div class="worker-head">
         <div><div class="worker-name">${escapeHtml(w.name)}</div><div class="worker-role">${escapeHtml(w.role||'—')} &middot; ${empLabel} &middot; joined ${w.joined}${myFailCount>0 ? ` &middot; <span style="color:var(--red);">${myFailCount} failed</span>` : ''}${w.canPostReminders ? ` &middot; <span style="color:var(--amber-dark);font-weight:600;">can post reminders</span>` : ''}${w.canOpenBoard ? ` &middot; <span style="color:var(--amber-dark);font-weight:600;">can open wall display</span>` : ''}</div>${headLine}</div>
         <div class="worker-balance">${bal} pts</div></div>
@@ -9046,6 +9121,7 @@
             w.canOpenBoard ? 'Stop wall display' : 'Allow wall display'}</button>
           <button class="btn btn-ghost btn-sm" data-reset-pin="${w.id}">Reset PIN</button>
           <button class="btn btn-red btn-sm" data-reset-worker="${w.id}">Reset Points &amp; Tasks</button>
+          <button class="btn btn-ghost btn-sm" data-disable-worker="${w.id}" style="color:#6B7280;">Disable account</button>
           <button class="btn btn-red btn-sm" data-delete-worker="${w.id}">Delete Worker</button>
           ${myFailCount>0 ? `<button class="btn btn-ghost btn-sm" data-view-fails="${w.id}">View Fails (${myFailCount})</button>` : ''}
           <button class="btn btn-ghost btn-sm" data-quality="${w.id}">Quality Issues${issueCountFor(w.id) ? ` (${issueCountFor(w.id)})` : ''}</button>
@@ -9059,6 +9135,32 @@
         <div id="quality-panel-${w.id}"></div>
         </div>`;
     }).join('');
+    listEl.querySelectorAll('[data-disable-worker]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const id = btn.dataset.disableWorker;
+        const w = allWorkers.find(x => x.id === id);
+        const team = allWorkers.filter(x => x.reportsTo === id && !x.disabled);
+        if(!confirm(`Disable ${w.name}'s account?\n\n`
+          + `• They can no longer log in, and drop off every board, ranking and list.\n`
+          + `• They get no new daily or weekly tasks; open tasks they have not sent in are removed.\n`
+          + `• Their points history, submissions and records are kept.\n`
+          + (team.length ? `• ${team.length} worker${team.length===1?'':'s'} report to them: their reviews go to admin until you choose a new head.\n` : '')
+          + `\nYou can enable the account again at any time.`)) return;
+        btn.disabled = true;
+        const ok = await disableWorker(id);
+        if(ok) drawWorkerList(); else btn.disabled = false;
+      };
+    });
+    listEl.querySelectorAll('[data-enable-worker]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const id = btn.dataset.enableWorker;
+        const w = allWorkers.find(x => x.id === id);
+        if(!confirm(`Enable ${w.name}'s account again? They can log in and get daily tasks from tomorrow's list on.`)) return;
+        btn.disabled = true;
+        const ok = await setWorkerDisabled(id, false);
+        if(ok){ adminLog('Enabled a worker account', w.name); drawWorkerList(); } else btn.disabled = false;
+      };
+    });
     listEl.querySelectorAll('[data-delete-worker]').forEach(btn=>{
       btn.onclick = ()=>{
         const workerId = btn.dataset.deleteWorker;
@@ -9313,7 +9415,7 @@
           const msg = document.getElementById('ew-msg-'+workerId);
           if(!newName){ msg.style.color='var(--red)'; msg.textContent='Name is required.'; return; }
           this.disabled = true; this.textContent = 'Saving…';
-          const all = await getWorkers();
+          const all = await getAllWorkers();
           const idx = all.findIndex(x=>x.id===workerId);
           if(idx>-1){
             const wasHead = all[idx].isHead;
@@ -9365,7 +9467,7 @@
       btn.onclick = async ()=>{
         const id = btn.dataset.remAuth;
         btn.disabled = true;
-        const fresh = await getWorkers();
+        const fresh = await getAllWorkers();
         const was = fresh.find(w => w.id === id);
         const next = fresh.map(w => w.id === id
           ? { ...w, canPostReminders: !w.canPostReminders } : w);
@@ -9384,7 +9486,7 @@
       btn.onclick = async ()=>{
         const id = btn.dataset.boardAuth;
         btn.disabled = true;
-        const fresh = await getWorkers();
+        const fresh = await getAllWorkers();
         const was = fresh.find(w => w.id === id);
         const next = fresh.map(w => w.id === id
           ? { ...w, canOpenBoard: !w.canOpenBoard } : w);
@@ -9411,7 +9513,7 @@
           if(!newPin) newPin = genPin();
           this.disabled = true; this.textContent = 'Saving…';
           const passwordHash = await sha256Hex(newPin);
-          const all = await getWorkers();
+          const all = await getAllWorkers();
           const idx = all.findIndex(x=>x.id===workerId);
           if(idx>-1){ all[idx].passwordHash = passwordHash; await setList(K_WORKERS, all); }
           const msgEl = document.getElementById('reset-msg-'+workerId);
@@ -9940,10 +10042,15 @@
         await setList(K_WEEKLY_TEMPLATES, all.filter(x=>x.id!==templateId));
         // Clear already-generated active copies so it disappears immediately
         // rather than lingering until the week rolls over.
-        const targets = await getTargets();
-        const dropIds = targets
-          .filter(t=> t.templateId===templateId && t.isWeekly && t.status==='active')
-          .map(t=>t.id);
+        // Copies already sent for review are left for the reviewer.
+        let dropIds = [];
+        try{
+          const [targets, subs] = await Promise.all([getTargets(), getPendingSubsStrict()]);
+          const pendingTargetIds = pendingTargetIdSet(subs);
+          dropIds = targets
+            .filter(t=> t.templateId===templateId && t.isWeekly && t.status==='active' && !t.everSubmitted && !pendingTargetIds.has(t.id))
+            .map(t=>t.id);
+        }catch(e){ console.error('Left this week\'s copies in place — could not read the review queue:', e); }
         if(dropIds.length) await applyTargetDeltas({ removeIds: dropIds });
         drawWeeklyTemplateList(filterHeadId, workers);
       };
@@ -10064,12 +10171,17 @@
         // template (for every worker) so it disappears immediately instead of
         // lingering until tomorrow's cleanup — removing the template alone only
         // stops future days from generating it.
-        const targets = await getTargets();
-        const subs = await getPendingSubs();
-        const pendingTargetIds = pendingTargetIdSet(subs);
-        const dropIds = targets
-          .filter(t=> t.templateId===templateId && t.status==='active' && !pendingTargetIds.has(t.id))
-          .map(t=>t.id);
+        // Strict reads: if the review queue cannot be read, clear nothing
+        // rather than treat sent work as unsent. Tomorrow's list simply will
+        // not include the task either way.
+        let dropIds = [];
+        try{
+          const [targets, subs] = await Promise.all([getTargets(), getPendingSubsStrict()]);
+          const pendingTargetIds = pendingTargetIdSet(subs);
+          dropIds = targets
+            .filter(t=> t.templateId===templateId && t.status==='active' && !t.everSubmitted && !pendingTargetIds.has(t.id))
+            .map(t=>t.id);
+        }catch(e){ console.error('Left today\'s copies in place — could not read the review queue:', e); }
         if(dropIds.length) await applyTargetDeltas({ removeIds: dropIds });
         drawRoleTemplateList(filterRole);
       };
@@ -10446,7 +10558,7 @@
     const el = document.getElementById('view-review');
     el.innerHTML = `<div class="empty">Loading…</div>`;
     const [subs, workers, targets, dayPts] = await Promise.all([
-      getPendingSubs(), getWorkers(), getTargets(), getDoListPoints()]);
+      getPendingSubs(), getAllWorkers(), getTargets(), getDoListPoints()]);
     const workerMap = {}; workers.forEach(w=>workerMap[w.id]=w);
     const targetMap = {}; targets.forEach(t=>targetMap[t.id]=t);
     const allPending = subs.filter(s=>s.status==='pending').sort((a,b)=>a.submittedAt.localeCompare(b.submittedAt));
@@ -10797,7 +10909,7 @@
     const el = document.getElementById('view-log');
     el.innerHTML = `<div class="empty">Loading…</div>`;
     logRows = []; logCursor = null; logDone = false;
-    const [firstPage, workers, roles] = await Promise.all([getSubsPage(null), getWorkers(), getRoles()]);
+    const [firstPage, workers, roles] = await Promise.all([getSubsPage(null), getAllWorkers(), getRoles()]);
     logRows = firstPage.rows; logCursor = firstPage.lastDoc; logDone = firstPage.done;
     const subs = logRows;
 
@@ -11135,7 +11247,7 @@
     page = page || 0;
     const el = document.getElementById('sq-list');
     if(!el) return;
-    const [quests, targets, workers, pendingSubs] = await Promise.all([getSideQuests(), getTargets(), getWorkers(), getPendingSubs()]);
+    const [quests, targets, workers, pendingSubs] = await Promise.all([getSideQuests(), getTargets(), getAllWorkers(), getPendingSubs()]);
     if(quests.length===0){ el.innerHTML = `<div class="card"><div class="empty">No challenger tasks yet.</div></div>`; return; }
     const workerMap = {}; workers.forEach(w=>workerMap[w.id]=w);
     const pendingTargetIds = pendingTargetIdSet(pendingSubs);
@@ -12370,7 +12482,7 @@
   async function renderHellAdmin(){
     const el = document.getElementById('view-hell');
     el.innerHTML = `<div class="empty">Loading…</div>`;
-    const [issues, workers, roles] = await Promise.all([getHellIssues(), getWorkers(), getRoles()]);
+    const [issues, workers, roles] = await Promise.all([getHellIssues(), getAllWorkers(), getRoles()]);
     const nameById = {}; workers.forEach(w=>{ nameById[w.id] = w.name; });
     const live = issues.filter(i => i.state === 'live');
     const open = issues.filter(i => i.state === 'open');
@@ -12723,7 +12835,7 @@
   // ---- Rewards ----
   async function renderRewards(){
     const el = document.getElementById('view-rewards');
-    const workers = await getWorkers();
+    const workers = await getAllWorkers();
     if(workers.length===0){ el.innerHTML = `<div class="card"><div class="empty">Add workers first to manage their points and redemptions.</div></div>`; return; }
     const catalog = await getCatalog();
     const ahSettings = await getSettings();
@@ -12756,7 +12868,7 @@
       <div class="card">
         <h3>Redeem points</h3>
         <div class="help">Record when a worker exchanges points for a real prize or bonus. This deducts from their balance.</div>
-        <div class="field"><label>Worker</label><select id="r-worker"><option value="">— choose worker —</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Worker</label><select id="r-worker"><option value="">— choose worker —</option>${workers.filter(w => !w.disabled).map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select></div>
         ${catalog.length>0 ? `<div class="field"><label>Quick-pick from catalog</label><select id="r-quickpick"><option value="">— choose a reward —</option>${catalog.map(c=>`<option value="${c.id}" data-name="${escapeHtml(c.name)}" data-cost="${c.pointsCost}">${escapeHtml(c.name)} (${c.pointsCost} pts)</option>`).join('')}</select></div>` : ''}
         <div class="row2">
           <div class="field"><label>Prize / bonus</label><input type="text" id="r-prize" placeholder="e.g. RM50 voucher"></div>
@@ -12768,7 +12880,7 @@
       <div class="toprow"><h2>Reward redemptions</h2></div>
       <div id="r-redeemed"></div>
       <div class="toprow"><h2>Points ledger</h2></div>
-      <select class="select-worker" id="r-filter"><option value="">— choose a worker to see their ledger —</option><option value="all">All workers</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('')}</select>
+      <select class="select-worker" id="r-filter"><option value="">— choose a worker to see their ledger —</option><option value="all">All workers</option>${workers.map(w=>`<option value="${w.id}">${escapeHtml(w.name)}${w.disabled ? ' (disabled)' : ''}</option>`).join('')}</select>
       <div id="r-list"></div>
       <div class="card" style="margin-top:14px;">
         <div class="eyebrow" style="margin-bottom:6px;">Task failed by mistake?</div>
@@ -12825,7 +12937,7 @@
       this.disabled = true; this.textContent = 'Loading…';
       const box = document.getElementById('r-revive-box');
       try{
-        const [fails, wk] = await Promise.all([getFails(), getWorkers()]);
+        const [fails, wk] = await Promise.all([getFails(), getAllWorkers()]);
         const nameById = {}; wk.forEach(w=>{ nameById[w.id] = w.name; });
         const recent = fails.slice()
           .sort((a,b)=> String(b.failedAt||'').localeCompare(String(a.failedAt||'')))
