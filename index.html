@@ -700,7 +700,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24b';
+  const APP_BUILD = '2026-11-24d';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -3517,11 +3517,12 @@
   async function getDayTop(){
     const yday = addDaysMY(todayStr(), -1);
     const hit = cacheGet(K_DAY_TOP);
-    if(hit && hit.date === yday) return hit;
+    if(hit && hit.date === yday && hit.v === 2) return hit;
     try{
       const doc = await db.collection('appdata').doc(K_DAY_TOP).get();
       const v = doc.exists ? doc.data().value : null;
-      if(v && v.date === yday){ cachePut(K_DAY_TOP, v); return v; }
+      // v:2 = counted by submission time. Anything older is worked out again.
+      if(v && v.date === yday && v.v === 2){ cachePut(K_DAY_TOP, v); return v; }
       const m = yday.slice(0, 7);
       const live = await getListStrict(K_LEDGER);
       const past = m === monthNow() ? [] : await getListStrict(ledgerDocFor(m));
@@ -3536,7 +3537,7 @@
       const best = Math.max(0, ...Object.values(sum));
       const top = best > 0 ? Object.keys(sum).filter(id => sum[id] === best)
         .map(id => ({ workerId: id, name: active.get(id).name || '', points: best })) : [];
-      const out = { date: yday, top, builtAt: new Date().toISOString() };
+      const out = { v: 2, date: yday, top, builtAt: new Date().toISOString() };
       try{ await saveDoc(K_DAY_TOP, out); }catch(e){ cachePut(K_DAY_TOP, out); }
       return out;
     }catch(e){
@@ -5462,6 +5463,16 @@
     // and an admin opening the app regenerates as a safety net. A worker
     // only steps in when their own tasks are genuinely missing — which
     // costs one cached read instead of eight strict ones.
+    root.innerHTML = `
+      <div class="worker-shell">
+        <div class="worker-hero">
+          <div class="co">Exprexa Performance</div>
+          <div class="sub">Worker Portal</div>
+          ${params.wid ? '' : '<a class="admin-in" href="#admin">Admin</a>'}
+        </div>
+        <div class="worker-body" id="wp-body"><div class="empty">Loading…</div></div>
+      </div>
+    `;
     const _today = todayStr();
     let needGen = true;
     try{
@@ -5473,20 +5484,14 @@
     // Someone on a rest day or a holiday closure legitimately has nothing
     // today, and would otherwise ask for generation every time they tapped
     // anything. Once per tab is enough to cover a genuinely missed morning.
-    if(needGen && _genRanFor !== _today){
+    // Before 7am nobody has tasks for today yet — that is normal, the 7am
+    // job hands them out. Checking anyway made every phone opened between
+    // 5am and 7am run the full hand-out before showing anything.
+    const _early = nowMYParts().minutesOfDay < DAILY_OPEN_MINUTES;
+    if(needGen && !_early && _genRanFor !== _today){
       _genRanFor = _today;
       await generateDailyTargets({ sweep: false });
     }
-    root.innerHTML = `
-      <div class="worker-shell">
-        <div class="worker-hero">
-          <div class="co">Exprexa Performance</div>
-          <div class="sub">Worker Portal</div>
-          ${params.wid ? '' : '<a class="admin-in" href="#admin">Admin</a>'}
-        </div>
-        <div class="worker-body" id="wp-body"><div class="empty">Loading…</div></div>
-      </div>
-    `;
     const body = document.getElementById('wp-body');
     // Alphabetical, not the order they happen to have been added in. The
     // list is read by someone looking for one name in sixteen, and the
