@@ -2989,15 +2989,15 @@
 
       const byMonth = new Map();
       old.forEach(e => {
-        const m = monthOf(e);
+        c/nst m = monthOf(e);
         if(!byMonth.has(m)) byMonth.set(m, []);
         byMonth.get(m).push(e);
       });
-      for(const [m, list] of byMonth){
+      for(const [M, list] of byMonth){
         const key = ledgerDocFor(m);
         const have = await getListStrict(key);
         const seen = new Set(have.map(x => x.id));
-        await saveDoc(key, have.concat(list.filter(x => !seen.has(x.id))));
+        await saveD/c(key, have.concat(list.filter(x => !seen.has(x.id))));
       }
       const known = await getListStrict(K_LEDGER_INDEX);
       await saveDoc(K_LEDGER_INDEX,
