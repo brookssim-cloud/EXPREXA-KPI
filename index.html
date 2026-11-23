@@ -700,6 +700,12 @@
     var log = window.__PT = [];
     function now(){ return performance.now(); }
     function add(at, label, extra){ log.push({ at: Math.round(at), label: label, extra: extra || '' }); }
+    window.__ptAdd = function(label, extra){ add(now(), label, extra); };
+    var ce = console.error;
+    console.error = function(){
+      try{ add(now(), 'ERROR', Array.prototype.map.call(arguments, function(a){ return a && a.message ? a.message : String(a); }).join(' ').slice(0, 160)); }catch(e){}
+      return ce.apply(console, arguments);
+    };
     try{
       var nav = performance.getEntriesByType('navigation')[0];
       if(nav){ add(nav.responseEnd, 'Page file downloaded', Math.round((nav.transferSize||0)/1024) + ' KB over network'); }
@@ -760,7 +766,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24f';
+  const APP_BUILD = '2026-11-24g';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -2549,8 +2555,13 @@
   // the real documents.
   const K_DONE_SUMMARY = 'perf-targets-done-summary';
   const DONE_SUMMARY_MAX_AGE_MS = 6 * 3600 * 1000;
+  // The copy this tab built most recently, kept for two minutes whether or
+  // not it could be saved. Without it, a summary that failed to save was
+  // rebuilt — over a megabyte of reads — on every screen the worker opened.
+  let _tabSummary = null;
   async function invalidateDoneSummary(){
     cacheDrop(K_DONE_SUMMARY);
+    _tabSummary = null;
     try{
       const ref = db.collection('appdata').doc(K_DONE_SUMMARY);
       await db.runTransaction(async tx => {
@@ -2585,13 +2596,17 @@
     }
     // Missing, out of date or too old: build it from the real documents.
     const gen = (d.exists && Number(d.data().gen)) || 0;
+    // Unless this tab built it moments ago and nothing has changed since.
+    if(_tabSummary && _tabSummary.gen === gen && Date.now() - _tabSummary.at < 120000) return _copy(_tabSummary.v);
     const months = await getListStrict(K_TARGETS_DONE_INDEX);
     const [working, parts] = await Promise.all([
       getListStrict(K_TARGETS),
       Promise.all(months.map(m => getListStrict(doneDocFor(m))))
     ]);
     const built = buildDoneSummary(parts.flat(), new Set(working.map(t => t.id)));
+    _tabSummary = { v: built, at: Date.now(), gen };
     let saved = false;
+    const _ts = Date.now();
     try{
       await db.runTransaction(async tx => {
         const cur = await tx.get(ref);
@@ -2601,6 +2616,7 @@
         saved = true;
       });
     }catch(e){ console.error('Could not save the completed-work summary:', e); }
+    if(window.__ptAdd) window.__ptAdd('summary save ' + (saved ? 'OK' : 'SKIPPED'), ((Date.now() - _ts) / 1000).toFixed(1) + 's · gen ' + gen);
     // Only a copy that was saved is safe to hand to other screens in this tab.
     if(saved) cachePut(K_DONE_SUMMARY, built);
     return _copy(built);
