@@ -689,7 +689,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-22d';
+  const APP_BUILD = '2026-11-23b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -4911,7 +4911,6 @@
   // worker is scored the old way, so nothing that already calls this
   // changes behaviour by adding the argument later.
   function scoreWorker(workerId, { targets, fails, stats, cutoffDate, archive, issues, modes }){
-    const onDoList = ((modes || {})[workerId] || MODE_TASKS) === MODE_DOLIST;
     const inPeriod = d => !cutoffDate || (d && d >= cutoffDate);
     const mine = targets.filter(t => t.workerId === workerId);
     const st = (stats && stats.byWorker ? stats.byWorker[workerId] : null)
@@ -4956,33 +4955,12 @@
     }
     let reliability = dailyAssigned ? (dailyDone / dailyAssigned) * 100 : null;
 
-    // A Do list worker finishes a day, not a task, so their reliability is
-    // measured in days: the jobs are only how a day is made up.
-    //
-    // This matters because a missed day leaves one fail per unticked job.
-    // Counted the ordinary way, one bad day on a five-job list would cost
-    // five times what the same bad day costs somebody submitting one by
-    // one. The jobs are still listed by name under Missed tasks — the
-    // record keeps the detail, the score does not double-count it.
-    if(onDoList){
-      const dayOfFail = f => f.taskDate || String(f.failedAt || '').slice(0, 10);
-      const byDate = {};
-      dailyish.filter(t => t.isDaily).forEach(t => {
-        (byDate[t.createdAt] = byDate[t.createdAt] || []).push(t);
-      });
-      const days = new Set(Object.keys(byDate));
-      // A day counts as cleared only when every job on it was approved.
-      const cleared = new Set(Object.keys(byDate)
-        .filter(d => byDate[d].every(t => t.status === 'achieved')));
-      // A missed job's target is deleted at 5am and only the fail remains,
-      // so without this a half-missed day would look complete.
-      expiredFails.forEach(f => {
-        const d = dayOfFail(f);
-        if(!d) return;
-        days.add(d); cleared.delete(d);
-      });
-      reliability = days.size ? (cleared.size / days.size) * 100 : null;
-    }
+    // Do list workers are counted the same way as everyone else: each job is
+    // one task. A day of five jobs is five tasks, and a missed job costs
+    // exactly what a missed task costs anyone working one by one. (It used
+    // to be counted in whole days — a day passed only if every job on it was
+    // approved — which measured Do list workers on a different scale from
+    // the rest of the team.)
 
     // --- Challenger: follow-through, with a floor that grows as they take on
     // more. Pure completed÷accepted would rank 1-of-1 above 4-of-5, making it
@@ -7355,7 +7333,7 @@
       ? (b.sideQuestsAchieved - a.sideQuestsAchieved || a.reachedAtPeriod.localeCompare(b.reachedAtPeriod))
       : (b.earnedPeriod - a.earnedPeriod || a.reachedAtPeriod.localeCompare(b.reachedAtPeriod)));
     ranked.forEach((w,i)=> w.periodRank = i+1);
-    const top20 = ranked.slice(0, 20);
+    const top20 = ranked;   // everyone, not just the top 20
     const periodLabel = { lifetime:'All Time', sidequest:'Challenger Tasks' }[period];
 
     body.innerHTML = `
@@ -7369,7 +7347,7 @@
       <div class="toggle-group" id="wp-lb-period-toggle">
         ${PERIODS.map(p=>`<div class="toggle-opt${p.key===period?' selected':''}" data-period="${p.key}" style="${p.key===period?'border-color:var(--amber);color:var(--amber-dark);background:#FFF6E8;':''}">${p.label}</div>`).join('')}
       </div>
-      <div class="help" style="margin-top:0;">Top ${top20.length} &middot; ranked by ${period==='sidequest' ? 'challenger tasks completed' : periodLabel.toLowerCase()+' points'}</div>
+      <div class="help" style="margin-top:0;">All ${top20.length} &middot; ranked by ${period==='sidequest' ? 'challenger tasks completed' : periodLabel.toLowerCase()+' points'}</div>
       <div id="wp-lb-list"></div>
     `;
     document.getElementById('wp-back').onclick = (e)=>{ e.preventDefault(); renderWorkerDashboard(body, worker); };
@@ -8774,7 +8752,7 @@
       ? (b.sideQuestsAchieved - a.sideQuestsAchieved || a.reachedAtPeriod.localeCompare(b.reachedAtPeriod))
       : (b.earnedPeriod - a.earnedPeriod || a.reachedAtPeriod.localeCompare(b.reachedAtPeriod)));
     periodRanked.forEach((w,i)=> w.periodRank = i+1);
-    const top20 = periodRanked.slice(0, 20);
+    const top20 = periodRanked;   // everyone, not just the top 20
 
     const periodTargets = targets.filter(t=> t.status==='achieved' && t.achievedAt && (cutoff===null || t.achievedAt >= cutoff)).length;
     const periodTotalPts = periodRanked.reduce((s,w)=>s+w.earnedPeriod,0);
@@ -8811,7 +8789,7 @@
       <div class="toggle-group" id="lb-period-toggle">
         ${PERIODS.map(p=>`<div class="toggle-opt${p.key===period?' selected':''}" data-period="${p.key}" style="${p.key===period?'border-color:var(--amber);color:var(--amber-dark);background:#FFF6E8;':''}">${p.label}</div>`).join('')}
       </div>
-      <div class="eyebrow" style="margin-bottom:10px;">Top ${top20.length} &middot; ranked by ${period==='sidequest' ? 'challenger tasks completed' : periodLabel.toLowerCase()+' points'}</div>
+      <div class="eyebrow" style="margin-bottom:10px;">All ${top20.length} &middot; ranked by ${period==='sidequest' ? 'challenger tasks completed' : periodLabel.toLowerCase()+' points'}</div>
       <div id="lb-list"></div>
       <div class="card" style="margin-top:16px;">
         <div class="eyebrow" style="margin-bottom:6px;">Worker access</div>
@@ -12939,9 +12917,11 @@
       try{
         const [fails, wk] = await Promise.all([getFails(), getAllWorkers()]);
         const nameById = {}; wk.forEach(w=>{ nameById[w.id] = w.name; });
+        // Every fail on record, newest first. The search used to look only
+        // at the newest 120 across the whole team — a few days' worth — so an
+        // older miss could not be found by name at all.
         const recent = fails.slice()
-          .sort((a,b)=> String(b.failedAt||'').localeCompare(String(a.failedAt||'')))
-          .slice(0, 120);
+          .sort((a,b)=> String(b.failedAt||'').localeCompare(String(a.failedAt||'')));
         if(recent.length === 0){
           box.innerHTML = `<div class="help" style="margin-bottom:0;">No failed tasks on record.</div>`;
           this.disabled = false; this.textContent = 'Show failed tasks';
@@ -12955,11 +12935,12 @@
         const typeLabel = { daily:'Daily', weekly:'Weekly', sidequest:'Challenger' };
         function draw(){
           const q = (document.getElementById('r-revive-q').value || '').trim().toLowerCase();
-          const shown = (q
+          const matches = q
             ? recent.filter(f => String(nameById[f.workerId]||'').toLowerCase().includes(q)
                 || String(f.title||'').toLowerCase().includes(q))
-            : recent).slice(0, 40);
-          if(shown.length === 0){ listEl.innerHTML = `<div class="help" style="margin-bottom:0;">Nothing matches.</div>`; return; }
+            : recent;
+          const shown = matches.slice(0, 60);
+          if(shown.length === 0){ listEl.innerHTML = `<div class="help" style="margin-bottom:0;">Nothing matches. A task missed today only shows here once the list closes for the day.</div>`; return; }
           listEl.innerHTML = shown.map(f=>`
             <div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line);">
               <div style="flex:1;min-width:0;">
@@ -12972,7 +12953,8 @@
                 </div>
               </div>
               <button class="btn btn-ghost btn-sm" data-revive="${escapeHtml(f.id)}">Revive</button>
-            </div>`).join('');
+            </div>`).join('') + (matches.length > shown.length
+              ? `<div class="help" style="margin:8px 0 0;">Showing the newest ${shown.length} of ${matches.length}. Type a name or task to narrow it.</div>` : '');
           listEl.querySelectorAll('[data-revive]').forEach(btn=>{
             btn.onclick = async function(){
               const f = recent.find(x => x.id === this.dataset.revive);
