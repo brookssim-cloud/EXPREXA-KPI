@@ -700,7 +700,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24a';
+  const APP_BUILD = '2026-11-24b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -3129,6 +3129,7 @@
       return false;
     }
     await addRedemptions(entries);
+    await dayTopTouched(entries);
     try{
       const cached = await getTotals();
       // Without a cache the totals have to come from every month, not from
@@ -3496,9 +3497,23 @@
   // Shown on every worker's screen and the admin screen each day. Worked out
   // once a day by whichever device asks first, then kept in a small
   // document so everyone else reads one tiny doc instead of the ledger.
-  // Counts the points earned (not redeemed) on yesterday's date. Disabled
+  // Counts the points earned (not redeemed) for work SUBMITTED yesterday,
+  // whenever it was approved. Entries with no submission time (manual
+  // awards, payouts) count on the day they were given. Disabled
   // workers are left out. A tie shows everyone on the top score.
   const K_DAY_TOP = 'perf-day-top';
+  function earnedDay(l){
+    if(l && l.at){ const d = new Date(l.at); if(!isNaN(d)) return todayStrFromDate(d); }
+    return (l && l.date) || '';
+  }
+  // Work sent yesterday but approved today changes yesterday's result, so
+  // the saved answer is thrown away and worked out again on the next view.
+  async function dayTopTouched(entries){
+    const yday = addDaysMY(todayStr(), -1);
+    if(!entries.some(l => l && l.type === 'earned' && earnedDay(l) === yday)) return;
+    cacheDrop(K_DAY_TOP);
+    try{ await db.collection('appdata').doc(K_DAY_TOP).set({ value: { date:'stale' } }); }catch(e){}
+  }
   async function getDayTop(){
     const yday = addDaysMY(todayStr(), -1);
     const hit = cacheGet(K_DAY_TOP);
@@ -3515,7 +3530,7 @@
       const sum = {}, seen = new Set();
       past.concat(live).forEach(l => {
         if(!l || seen.has(l.id)) return; seen.add(l.id);
-        if(l.type !== 'earned' || l.date !== yday || !active.has(l.workerId)) return;
+        if(l.type !== 'earned' || earnedDay(l) !== yday || !active.has(l.workerId)) return;
         sum[l.workerId] = (sum[l.workerId] || 0) + (Number(l.points) || 0);
       });
       const best = Math.max(0, ...Object.values(sum));
