@@ -584,7 +584,18 @@
 </script>
 </head>
 <body>
-<div id="root"></div>
+<div id="root"><div id="boot-loading" style="padding:60px 20px;text-align:center;font-family:'Inter',sans-serif;color:#6B7280;font-size:14px;">Loading&hellip;<br><span style="font-size:12px;">Memuatkan&hellip;</span></div></div>
+<script>
+  // If the app has not drawn anything after 20 seconds, say so in plain
+  // words instead of leaving an empty screen.
+  setTimeout(function(){
+    var b = document.getElementById('boot-loading');
+    if(!b) return;
+    b.innerHTML = '<div style="font-weight:600;color:#374151;">Still loading&hellip;</div>'
+      + '<div style="margin-top:6px;font-size:12.5px;">Check your internet connection, then tap Reload.<br>Semak sambungan internet anda, kemudian tekan Muat semula.</div>'
+      + '<button onclick="location.reload()" style="margin-top:14px;padding:9px 18px;border-radius:8px;border:0;background:#E8A33D;color:#fff;font-weight:600;font-size:14px;">Reload / Muat semula</button>';
+  }, 20000);
+</script>
 <div id="fb-status" style="position:fixed;bottom:0;left:0;right:0;background:#D64545;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;text-align:center;padding:6px;display:none;z-index:999;"></div>
 <div class="lightbox" id="lightbox">
   <button class="lightbox-close" id="lightbox-close">&times;</button>
@@ -689,7 +700,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-23b';
+  const APP_BUILD = '2026-11-24a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -3481,6 +3492,71 @@
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().slice(0,10);
   }
+  // ---- Yesterday's top earner ----
+  // Shown on every worker's screen and the admin screen each day. Worked out
+  // once a day by whichever device asks first, then kept in a small
+  // document so everyone else reads one tiny doc instead of the ledger.
+  // Counts the points earned (not redeemed) on yesterday's date. Disabled
+  // workers are left out. A tie shows everyone on the top score.
+  const K_DAY_TOP = 'perf-day-top';
+  async function getDayTop(){
+    const yday = addDaysMY(todayStr(), -1);
+    const hit = cacheGet(K_DAY_TOP);
+    if(hit && hit.date === yday) return hit;
+    try{
+      const doc = await db.collection('appdata').doc(K_DAY_TOP).get();
+      const v = doc.exists ? doc.data().value : null;
+      if(v && v.date === yday){ cachePut(K_DAY_TOP, v); return v; }
+      const m = yday.slice(0, 7);
+      const live = await getListStrict(K_LEDGER);
+      const past = m === monthNow() ? [] : await getListStrict(ledgerDocFor(m));
+      const workers = await getWorkers();
+      const active = new Map(workers.map(w => [w.id, w]));
+      const sum = {}, seen = new Set();
+      past.concat(live).forEach(l => {
+        if(!l || seen.has(l.id)) return; seen.add(l.id);
+        if(l.type !== 'earned' || l.date !== yday || !active.has(l.workerId)) return;
+        sum[l.workerId] = (sum[l.workerId] || 0) + (Number(l.points) || 0);
+      });
+      const best = Math.max(0, ...Object.values(sum));
+      const top = best > 0 ? Object.keys(sum).filter(id => sum[id] === best)
+        .map(id => ({ workerId: id, name: active.get(id).name || '', points: best })) : [];
+      const out = { date: yday, top, builtAt: new Date().toISOString() };
+      try{ await saveDoc(K_DAY_TOP, out); }catch(e){ cachePut(K_DAY_TOP, out); }
+      return out;
+    }catch(e){
+      console.error("Could not work out yesterday's top earner:", e);
+      return null;
+    }
+  }
+  function dayTopHtml(dt, meId){
+    if(!dt || !dt.top || !dt.top.length) return '';
+    const names = dt.top.map(t => escapeHtml(t.name)).join(' &amp; ');
+    const pts = dt.top[0].points;
+    const isMe = meId && dt.top.some(t => t.workerId === meId);
+    const d = new Date(dt.date + 'T12:00:00Z').toLocaleDateString('en-GB', { day:'numeric', month:'short', timeZone:'UTC' });
+    return `<div class="day-top" style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;
+        background:linear-gradient(135deg,#FFF6DB,#FFE9B8);border:1.5px solid #E8B44A;">
+        <div style="font-size:34px;line-height:1;">🏅</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9A6B12;">
+            Yesterday's top earner &middot; ${d}</div>
+          <div style="font-size:10.5px;color:#9A6B12;margin-bottom:3px;">Mata tertinggi semalam</div>
+          <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:17px;color:var(--ink);">${names}</div>
+          ${isMe ? `<div style="font-size:12px;font-weight:600;color:#1E7A46;margin-top:2px;">That's you! Well done 🎉 &middot; Itu anda! Syabas</div>` : ''}
+        </div>
+        <div style="text-align:right;white-space:nowrap;">
+          <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:20px;color:#1E7A46;">+${pts}</div>
+          <div style="font-size:10.5px;color:#9A6B12;">pts / mata</div>
+        </div>
+      </div>`;
+  }
+  async function fillDayTop(elId, meId){
+    const dt = await getDayTop();
+    const el = document.getElementById(elId);
+    if(el) el.innerHTML = dayTopHtml(dt, meId);
+  }
+
   async function reviveFail(fail, questHours){
     const { dateStr: today, minutesOfDay } = nowMYParts();
     const type = fail.type || (fail.sideQuestId ? 'sidequest' : (fail.weekOf ? 'weekly' : 'daily'));
@@ -6361,6 +6437,7 @@
         <div class="help" style="margin-top:6px;margin-bottom:0;">Currently ranked #${myRank} of ${allWorkers.length}</div>
         ${seasonEndNoticeHtml()}
       </div>
+      <div id="wp-daytop" style="margin-top:14px;"></div>
 
       ${(myTeam.length > 0 || extraIds.length > 0) ? `
       <div class="card" style="margin-top:14px;margin-bottom:0;border:1.5px solid var(--amber);background:#FFFAF0;">
@@ -6922,6 +6999,7 @@
     }
 
     wireBuildTag();
+    fillDayTop('wp-daytop', worker.id);
     // Leaving the dashboard signs this person out of the tab. Without
     // this they stayed unlocked, so on a shared phone the next person could
     // reach their tasks through a #worker&wid= link with no PIN.
@@ -7508,6 +7586,7 @@
         <div id="gen-note" style="display:none;margin:8px 0 0;padding:7px 11px;
           background:#FFF3DD;color:var(--amber-dark);border-radius:8px;
           font-size:12px;font-weight:600;"></div>
+        <div id="admin-daytop" style="margin:10px 0 0;"></div>
         <div class="content">
           <div class="view active" id="view-leaderboard"></div>
           <div class="view" id="view-workers"></div>
@@ -7527,6 +7606,7 @@
       </div>
     `;
     wireBuildTag();
+    fillDayTop('admin-daytop', null);
     // Signing out is now a tap on your own name rather than a separate
     // word, which is how the forwarding board does it — so it asks first.
     const soEl = document.getElementById('admin-signout');
