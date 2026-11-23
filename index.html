@@ -760,7 +760,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24e';
+  const APP_BUILD = '2026-11-24f';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -806,8 +806,27 @@
   function pad(n){return n<10?'0'+n:''+n;}
   // Daily targets reset at midnight Malaysia time (Asia/Kuala_Lumpur), no
   // matter what timezone the admin's or worker's own device is set to.
+  // Building an Intl.DateTimeFormat is slow, and on an iPhone very slow —
+  // a few milliseconds each. These helpers run once per ledger entry, task
+  // and fail, thousands of times per screen, and creating a new formatter
+  // every call froze phones for 20–30 seconds. Each distinct formatter is
+  // now made once and kept.
+  const _dtfCache = new Map();
+  function cachedDTF(locale, opts){
+    const key = locale + '|' + JSON.stringify(opts);
+    let f = _dtfCache.get(key);
+    if(!f){ f = new Intl.DateTimeFormat(locale, opts); _dtfCache.set(key, f); }
+    return f;
+  }
+  // Malaysia has been UTC+8 all year, with no daylight saving, since 1982,
+  // so its date is plain arithmetic — no formatter needed at all.
+  const MY_OFFSET_MS = 8 * 3600 * 1000;
   function fmtDateInTZ(date, tz){
-    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(date);
+    if(tz === 'Asia/Kuala_Lumpur'){
+      const t = date.getTime();
+      if(!isNaN(t) && t > 410227200000) return new Date(t + MY_OFFSET_MS).toISOString().slice(0, 10);
+    }
+    const parts = cachedDTF('en-CA', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(date);
     const y = parts.find(p=>p.type==='year').value;
     const m = parts.find(p=>p.type==='month').value;
     const d = parts.find(p=>p.type==='day').value;
@@ -1281,7 +1300,7 @@
     const d = new Date(submittedAt);
     if(isNaN(d.getTime())) return null;
     const dateStr = fmtDateInTZ(d, 'Asia/Kuala_Lumpur');
-    const parts = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Kuala_Lumpur',
+    const parts = cachedDTF('en-GB', { timeZone:'Asia/Kuala_Lumpur',
       hour:'2-digit', minute:'2-digit', hour12:false }).formatToParts(d);
     const hour = parseInt(parts.find(p=>p.type==='hour').value, 10);
     const minute = parseInt(parts.find(p=>p.type==='minute').value, 10);
@@ -1319,7 +1338,7 @@
   function nowMYParts(){
     const now = new Date();
     const dateStr = fmtDateInTZ(now, 'Asia/Kuala_Lumpur');
-    const timeParts = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Kuala_Lumpur', hour:'2-digit', minute:'2-digit', hour12:false }).formatToParts(now);
+    const timeParts = cachedDTF('en-GB', { timeZone:'Asia/Kuala_Lumpur', hour:'2-digit', minute:'2-digit', hour12:false }).formatToParts(now);
     const hour = parseInt(timeParts.find(p=>p.type==='hour').value, 10);
     const minute = parseInt(timeParts.find(p=>p.type==='minute').value, 10);
     return { dateStr, minutesOfDay: hour*60 + minute };
@@ -3426,7 +3445,7 @@
   function minutesOfDayMY(iso){
     const t = new Date(iso);
     if(isNaN(t.getTime())) return null;
-    const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kuala_Lumpur',
+    const p = cachedDTF('en-GB', { timeZone: 'Asia/Kuala_Lumpur',
       hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(t);
     const h = parseInt(p.find(x => x.type === 'hour').value, 10);
     const m = parseInt(p.find(x => x.type === 'minute').value, 10);
@@ -7972,9 +7991,9 @@
   function annStamp(iso){
     const d = new Date(iso);
     if(isNaN(d.getTime())) return '';
-    const day = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Kuala_Lumpur',
+    const day = cachedDTF('en-GB', { timeZone:'Asia/Kuala_Lumpur',
       day:'numeric', month:'short' }).format(d);
-    const time = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Kuala_Lumpur',
+    const time = cachedDTF('en-GB', { timeZone:'Asia/Kuala_Lumpur',
       hour:'numeric', minute:'2-digit', hour12:true }).format(d).replace(' ', '');
     return day + ', ' + time;
   }
