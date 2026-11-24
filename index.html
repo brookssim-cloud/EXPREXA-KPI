@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24i';
+  const APP_BUILD = '2026-11-25b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -1413,7 +1413,7 @@
     if(closureDates && closureDates.has(dateStr)) return { ok: true, reason: 'holiday' };
     if(mins < AH_OFFICE_START || mins >= AH_OFFICE_END) return { ok: true, reason: 'outside hours' };
     return { ok: false,
-      why: 'That is inside office hours (9:00am–5:00pm), so it belongs to a normal task rather than here.' };
+      why: 'That is inside working hours, so it belongs to a normal task rather than here.' };
   }
   // The submission id carries the kind, the way day_ and dolist_ ids already
   // do elsewhere. It is minted in one place, so every screen that reviews one
@@ -6006,6 +6006,289 @@
     });
   }
 
+
+  // =========================================================
+  // EXTRA WORK — claimed by the worker, approved by an admin
+  // =========================================================
+  // Work beyond the job — covering a colleague, a standby day, a one-off
+  // job, training someone — reported by the worker rather than created by
+  // an admin. It only ever ADDS points: an approval pays, a rejection costs
+  // nothing, and neither touches reliability, quality or the challenger
+  // figure, because none of it is a task anybody was assigned. What it does
+  // do is leave a record: every approved claim is listed in the person's
+  // performance report, so a review can see what they gave beyond the job.
+  //
+  // Kept in a collection of its own rather than with task submissions, so
+  // nothing that reads submissions — the sweep, head queues, scoring — can
+  // ever mistake a claim for an assigned task. The photo sits in a separate
+  // document so a list of claims never downloads every picture.
+  const EXTRA_COLLECTION = 'perf_extra_work';
+  const EXTRA_PHOTOS = 'perf_extra_photos';
+  const EXTRA_DAILY_CAP = 2;
+  const EXTRA_MAX_DAYS_BACK = 30;
+  const EXTRA_KINDS = [
+    { id:'cover', en:'Cover a colleague', ms:'Ganti rakan sekerja', opts:[
+      { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:48 },
+      { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:96 },
+      { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:192 } ] },
+    { id:'standby', en:'Standby day', ms:'Hari siap sedia', opts:[
+      { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:32 },
+      { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:64 },
+      { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:96 } ] },
+    { id:'oneoff', en:'One-off job', ms:'Kerja sekali sahaja', opts:[
+      { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:25 },
+      { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:50 },
+      { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:100 } ] },
+    { id:'train', en:'Train a colleague', ms:'Melatih rakan sekerja', opts:[
+      { id:'1w',  en:'Up to 1 week',  ms:'Sehingga 1 minggu', pts:100 },
+      { id:'2w',  en:'Up to 2 weeks', ms:'Sehingga 2 minggu', pts:200 } ] },
+  ];
+  function extraKind(id){ return EXTRA_KINDS.find(k => k.id === id) || null; }
+  function extraOpt(kindId, optId){ const k = extraKind(kindId); return k ? (k.opts.find(o => o.id === optId) || null) : null; }
+  // The points are looked up again from the kind and option rather than
+  // trusted from the claim, so a claim can never pay more than the table.
+  function extraPoints(c){ const o = extraOpt(c.kind, c.opt); return o ? o.pts : 0; }
+  function extraLabel(c){
+    const k = extraKind(c.kind), o = extraOpt(c.kind, c.opt);
+    return (k ? k.en : 'Extra work') + (o ? ' — ' + o.en.toLowerCase() : '');
+  }
+  function extraLabelMs(c){
+    const k = extraKind(c.kind), o = extraOpt(c.kind, c.opt);
+    return (k ? k.ms : 'Kerja tambahan') + (o ? ' — ' + o.ms.toLowerCase() : '');
+  }
+  async function getMyExtraClaims(workerId){
+    const snap = await db.collection(EXTRA_COLLECTION).where('workerId','==',workerId).get();
+    return snap.docs.map(d => d.data());
+  }
+  async function getPendingExtraClaims(){
+    try{
+      const snap = await db.collection(EXTRA_COLLECTION).where('status','==','pending').get();
+      return snap.docs.map(d => d.data());
+    }catch(e){ console.error('Could not load extra-work claims:', e); return []; }
+  }
+  async function getExtraPhoto(id){
+    try{
+      const d = await db.collection(EXTRA_PHOTOS).doc(id).get();
+      return d.exists ? (d.data().photo || null) : null;
+    }catch(e){ return null; }
+  }
+  function extraSentOn(c){ return c && c.submittedAt ? todayStrFromDate(new Date(c.submittedAt)) : ''; }
+
+  async function renderExtraWork(host, worker){
+    if(!host) return;
+    let mine = [];
+    try{ mine = await getMyExtraClaims(worker.id); }
+    catch(e){ host.innerHTML = `<div class="help">Could not load your extra work right now. / Tidak dapat memuatkan kerja tambahan anda sekarang.</div>`; return; }
+    const today = todayStr();
+    const usedToday = mine.filter(c => extraSentOn(c) === today).length;
+    const left = Math.max(0, EXTRA_DAILY_CAP - usedToday);
+    const recent = mine.slice().sort((a,b) => String(b.submittedAt||'').localeCompare(String(a.submittedAt||''))).slice(0, 5);
+    const statusOf = c => c.status === 'approved'
+      ? `<span style="color:var(--green);font-weight:700;">Approved · Diluluskan · +${c.points} pts</span>`
+      : c.status === 'rejected'
+      ? `<span style="color:var(--red);font-weight:700;">Not approved · Tidak diluluskan</span>`
+        + (c.remark ? `<div class="help" style="margin-top:3px;">${escapeHtml(c.remark)}</div>` : '')
+      : `<span style="color:var(--muted);font-weight:700;">Waiting for admin · Menunggu admin</span>`;
+
+    host.innerHTML = `
+      <div class="help" style="margin-bottom:10px;">
+        Did extra work beyond your own job? Claim it here with a photo and an admin will review it.
+        These points go towards rewards and do not change your performance score.
+        Approved claims are kept on your record.
+        <div style="color:#0f766e;margin-top:6px;">
+          Buat kerja tambahan di luar tugas anda? Tuntut di sini bersama gambar dan admin akan menyemaknya.
+          Mata ini untuk ganjaran dan tidak mengubah skor prestasi anda.
+          Tuntutan yang diluluskan disimpan dalam rekod anda.</div>
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
+        ${left > 0 ? `${left} of ${EXTRA_DAILY_CAP} left today · ${left} daripada ${EXTRA_DAILY_CAP} lagi hari ini`
+          : `You have sent ${EXTRA_DAILY_CAP} today — try again tomorrow. · Anda sudah menghantar ${EXTRA_DAILY_CAP} hari ini — cuba lagi esok.`}
+      </div>
+      ${left > 0 ? `<button class="btn btn-amber btn-sm" id="xw-open">Claim extra work · Tuntut kerja tambahan</button>` : ''}
+      <div id="xw-form"></div>
+      ${recent.length ? `<div style="margin-top:14px;">` + recent.map(c => `
+        <div style="padding:9px 0;border-top:1px solid var(--line);">
+          <div style="font-size:13px;font-weight:600;">${escapeHtml(extraLabel(c))}</div>
+          <div class="help" style="margin-top:1px;">${escapeHtml(extraLabelMs(c))}</div>
+          <div class="help" style="margin-top:2px;">${escapeHtml(c.activityDate || '')}${c.note ? ' · ' + escapeHtml(c.note) : ''}</div>
+          <div style="margin-top:4px;font-size:12px;">${statusOf(c)}</div>
+        </div>`).join('') + `</div>` : ''}`;
+
+    const openBtn = document.getElementById('xw-open');
+    if(!openBtn) return;
+    openBtn.onclick = () => {
+      const formHost = document.getElementById('xw-form');
+      if(formHost.innerHTML){ formHost.innerHTML = ''; return; }
+      const minDate = addDaysMY(today, -EXTRA_MAX_DAYS_BACK);
+      let kind = null, opt = null, compressed = null;
+      const claimId = uid();
+      formHost.innerHTML = `
+        <div style="margin-top:12px;">
+          <div class="field"><label>What did you do? · Apa yang anda buat?</label>
+            <div id="xw-kinds" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              ${EXTRA_KINDS.map(k => `<button type="button" class="btn btn-ghost btn-sm xw-kind" data-kind="${k.id}"
+                style="display:block;text-align:left;line-height:1.3;padding:9px 10px;">${escapeHtml(k.en)}<br>
+                <span style="font-weight:400;font-size:11.5px;opacity:.8;">${escapeHtml(k.ms)}</span></button>`).join('')}
+            </div>
+          </div>
+          <div class="field" id="xw-opts-wrap" style="display:none;"><label>How long? · Berapa lama?</label>
+            <div id="xw-opts" style="display:flex;flex-direction:column;gap:8px;"></div>
+          </div>
+          <div class="field"><label>Date it happened · Tarikh ia berlaku</label>
+            <input type="date" id="xw-date" value="${today}" min="${minDate}" max="${today}"></div>
+          <div class="field"><label>Details · Butiran</label>
+            <textarea id="xw-note" rows="2" maxlength="200"
+              placeholder="e.g. Covered Aina at the counter / cth. Ganti Aina di kaunter"></textarea></div>
+          <div class="file-drop">
+            <div style="font-size:12.5px;color:var(--muted);">Photo as proof (required) · Gambar sebagai bukti (wajib)</div>
+            <input type="file" accept="image/*" id="xw-file">
+            <img class="thumb-preview" id="xw-thumb">
+          </div>
+          <button class="btn btn-primary btn-sm" id="xw-send">Send to admin · Hantar kepada admin</button>
+          <div id="xw-msg" style="margin-top:6px;font-size:12px;"></div>
+        </div>`;
+      const msgEl = document.getElementById('xw-msg');
+      const fail = (en, ms) => { msgEl.style.color = 'var(--red)'; msgEl.innerHTML = escapeHtml(en) + '<br>' + escapeHtml(ms); };
+      const drawOpts = () => {
+        const k = extraKind(kind);
+        document.getElementById('xw-opts-wrap').style.display = k ? '' : 'none';
+        document.getElementById('xw-opts').innerHTML = k ? k.opts.map(o => `
+          <button type="button" class="btn btn-sm ${o.id === opt ? 'btn-primary' : 'btn-ghost'} xw-opt" data-opt="${o.id}"
+            style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="text-align:left;">${escapeHtml(o.en)} · <span style="font-weight:400;">${escapeHtml(o.ms)}</span></span>
+            <b>${o.pts} pts</b></button>`).join('') : '';
+        formHost.querySelectorAll('.xw-opt').forEach(b => b.onclick = () => { opt = b.dataset.opt; drawOpts(); });
+      };
+      formHost.querySelectorAll('.xw-kind').forEach(b => b.onclick = () => {
+        kind = b.dataset.kind; opt = null;
+        formHost.querySelectorAll('.xw-kind').forEach(x => {
+          x.classList.toggle('btn-primary', x === b); x.classList.toggle('btn-ghost', x !== b); });
+        drawOpts();
+      });
+      const fileEl = document.getElementById('xw-file');
+      fileEl.onchange = async () => {
+        if(!fileEl.files[0]) return;
+        try{
+          compressed = await compressImage(fileEl.files[0], 720, 0.5);
+          const th = document.getElementById('xw-thumb'); th.src = compressed; th.style.display = 'block';
+        }catch(e){ compressed = null; fail('Could not read that image — try another.', 'Tidak dapat membaca gambar itu — cuba yang lain.'); }
+      };
+      const sendEl = document.getElementById('xw-send');
+      sendEl.onclick = async () => {
+        const date = document.getElementById('xw-date').value;
+        const note = document.getElementById('xw-note').value.trim();
+        if(!kind) return fail('Pick what you did.', 'Pilih apa yang anda buat.');
+        if(!opt) return fail('Pick how long it took.', 'Pilih berapa lama.');
+        if(!date || date > today || date < minDate) return fail(`Pick the date it happened, within the last ${EXTRA_MAX_DAYS_BACK} days.`,
+          `Pilih tarikh ia berlaku, dalam tempoh ${EXTRA_MAX_DAYS_BACK} hari lepas.`);
+        if(note.length < 3) return fail('Say briefly what you did.', 'Terangkan secara ringkas apa yang anda buat.');
+        if(!compressed) return fail('Attach a photo as proof.', 'Lampirkan gambar sebagai bukti.');
+        sendEl.disabled = true; sendEl.textContent = 'Sending… · Menghantar…';
+        try{
+          // Counted again from the server, not from the page — they may
+          // have sent one from another phone since it loaded.
+          const fresh = await getMyExtraClaims(worker.id);
+          if(fresh.filter(c => extraSentOn(c) === todayStr()).length >= EXTRA_DAILY_CAP){
+            sendEl.disabled = false; sendEl.textContent = 'Send to admin · Hantar kepada admin';
+            return fail(`You have already sent ${EXTRA_DAILY_CAP} today.`, `Anda sudah menghantar ${EXTRA_DAILY_CAP} hari ini.`);
+          }
+          await db.collection(EXTRA_PHOTOS).doc(claimId).set({ photo: compressed, at: new Date().toISOString() });
+          const claim = { id: claimId, workerId: worker.id, workerName: worker.name || '',
+            kind, opt, points: extraPoints({ kind, opt }), activityDate: date, note,
+            hasPhoto: true, status: 'pending', submittedAt: new Date().toISOString() };
+          await db.collection(EXTRA_COLLECTION).doc(claimId).set(claim);
+          renderExtraWork(host, worker);
+        }catch(e){
+          sendEl.disabled = false; sendEl.textContent = 'Send to admin · Hantar kepada admin';
+          fail('Could not send: ' + e.message, 'Tidak dapat dihantar — cuba lagi.');
+        }
+      };
+    };
+  }
+
+  // Approve: the points first, then the claim. The ledger entry carries the
+  // claim's id, so if marking the claim fails and it is approved again, the
+  // second award is recognised as the same one and not paid twice.
+  async function approveExtraClaim(id){
+    const ref = db.collection(EXTRA_COLLECTION).doc(id);
+    const d = await ref.get();
+    if(!d.exists) throw new Error('This claim is no longer on file.');
+    const c = d.data();
+    if(c.status !== 'pending') throw new Error('Already reviewed.');
+    const pts = extraPoints(c);
+    const ok = await appendLedger([{ id: 'xw-' + c.id, workerId: c.workerId, type: 'earned', points: pts,
+      note: 'Extra work — ' + extraLabel(c) + (c.note ? ': ' + c.note : ''),
+      date: todayStr(), at: c.submittedAt || new Date().toISOString(),
+      kind: 'extra', extraId: c.id, extraDate: c.activityDate || '' }]);
+    if(ok === false) throw new Error('Could not add the points — nothing was changed.');
+    await ref.update({ status: 'approved', points: pts, reviewedAt: new Date().toISOString(),
+      reviewedBy: (CURRENT_ADMIN && CURRENT_ADMIN.name) || 'admin' });
+  }
+  async function rejectExtraClaim(id, remark){
+    const ref = db.collection(EXTRA_COLLECTION).doc(id);
+    await db.runTransaction(async tx => {
+      const d = await tx.get(ref);
+      if(!d.exists) throw new Error('This claim is no longer on file.');
+      if(d.data().status !== 'pending') throw new Error('Already reviewed.');
+      tx.update(ref, { status: 'rejected', remark, reviewedAt: new Date().toISOString(),
+        reviewedBy: (CURRENT_ADMIN && CURRENT_ADMIN.name) || 'admin' });
+    });
+  }
+  function drawExtraReview(listEl, claims, workerMap, onChange){
+    const rows = claims.slice().sort((a,b) => String(a.submittedAt||'').localeCompare(String(b.submittedAt||'')));
+    if(!rows.length){ listEl.innerHTML = `<div class="card"><div class="empty">No extra-work claims waiting.</div></div>`; return; }
+    listEl.innerHTML = rows.map(c => {
+      const w = workerMap[c.workerId];
+      return `
+      <div class="sub-card" data-xw-card="${escapeHtml(c.id)}">
+        <div class="sub-top">
+          <div><div class="sub-title">Extra work · ${escapeHtml(extraLabel(c))}</div>
+          <div class="sub-meta">${escapeHtml(w ? w.name : (c.workerName || '—'))} &middot; happened ${escapeHtml(c.activityDate || '—')}
+            &middot; sent ${escapeHtml(new Date(c.submittedAt).toLocaleString())}</div></div>
+          <div class="target-pts">+${extraPoints(c)} pts</div>
+        </div>
+        <div class="sub-photo-slot" data-xw-photo="${escapeHtml(c.id)}" style="margin-top:10px;font-size:11.5px;color:var(--muted);">Loading photo…</div>
+        ${c.note ? `<div class="sub-note">${escapeHtml(c.note)}</div>` : ''}
+        <div class="help" style="margin-top:6px;">Points only — approving or rejecting does not change this person's score.</div>
+        <input type="text" class="rv-remark" id="xw-remark-${escapeHtml(c.id)}" placeholder="Remark for the worker — required if you reject" style="width:100%;margin-top:10px;padding:9px 11px;border:1.5px solid var(--line);border-radius:8px;font-size:12.5px;box-sizing:border-box;">
+        <div class="sub-actions">
+          <button class="btn btn-green btn-sm" data-xw-approve="${escapeHtml(c.id)}">Approve</button>
+          <button class="btn btn-red btn-sm" data-xw-reject="${escapeHtml(c.id)}">Reject</button>
+        </div>
+      </div>`; }).join('');
+    listEl.querySelectorAll('[data-xw-photo]').forEach(async slot => {
+      const photo = await getExtraPhoto(slot.dataset.xwPhoto);
+      if(!slot.parentNode) return;
+      if(photo){
+        slot.outerHTML = `<img class="sub-photo" src="${photo}" data-lightbox="${photo}" style="margin-top:10px;">`;
+        listEl.querySelectorAll('[data-lightbox]').forEach(img => img.onclick = () => openLightbox(img.dataset.lightbox));
+      }else slot.textContent = 'Photo not found';
+    });
+    const done = (id) => {
+      const card = listEl.querySelector(`[data-xw-card="${CSS.escape(id)}"]`);
+      if(card) card.remove();
+      onChange && onChange();
+    };
+    listEl.querySelectorAll('[data-xw-approve]').forEach(b => b.onclick = async () => {
+      b.disabled = true; b.textContent = 'Approving…';
+      try{ await approveExtraClaim(b.dataset.xwApprove); done(b.dataset.xwApprove); }
+      catch(e){ b.disabled = false; b.textContent = 'Approve'; alert('Could not approve: ' + e.message); }
+    });
+    listEl.querySelectorAll('[data-xw-reject]').forEach(b => b.onclick = async () => {
+      const remark = rejectReason(document.getElementById('xw-remark-' + b.dataset.xwReject));
+      if(!remark) return;
+      b.disabled = true; b.textContent = 'Rejecting…';
+      try{ await rejectExtraClaim(b.dataset.xwReject, remark); done(b.dataset.xwReject); }
+      catch(e){ b.disabled = false; b.textContent = 'Reject'; alert('Could not reject: ' + e.message); }
+    });
+  }
+  // Approved claims, from the ledger, for the performance report.
+  function extraWorkList(w, ledger, inP){
+    return (ledger || []).filter(l => l.workerId === w.id && l.type === 'earned' && l.kind === 'extra' && inP(l.date))
+      .map(l => ({ what: String(l.note || '').replace(/^Extra work — /, ''), when: l.extraDate || l.date, pts: l.points || 0 }))
+      .sort((a,b) => String(a.when).localeCompare(String(b.when)));
+  }
+
   // The worker's own record of help given outside office hours. They log it,
   // their head approves it, the points go to rewards. Nothing here feeds the
   // performance score — see the note on AH_OFFICE_START.
@@ -6037,12 +6320,21 @@
       .slice(0, 5);
 
     host.innerHTML = `
-      <div class="help" style="margin-bottom:10px;">
-        Answered the group or sorted a problem outside 9:00am–5:00pm, on a weekend
+      <!-- Tap the English to show the Malay, the same as a daily task's title. -->
+      <div class="help has-ms" id="ah-intro" title="Tap for Bahasa Malaysia"
+        style="margin-bottom:4px;cursor:pointer;border-bottom:1px dotted var(--line);display:inline;">
+        Answered the group or sorted a problem outside working hours, on a weekend
         or on a holiday? Log it here and your head will review it.
         Worth <strong>${pts} pts</strong> each, up to <strong>${cap} a week</strong>.
         These points go towards rewards and do not change your performance score.
       </div>
+      <div class="target-ms" id="ah-intro-ms" hidden style="margin-top:8px;">
+        Menjawab kumpulan atau menyelesaikan masalah di luar waktu bekerja, pada hujung minggu
+        atau cuti umum? Catat di sini dan ketua anda akan menyemaknya.
+        Bernilai <strong>${pts} mata</strong> setiap satu, sehingga <strong>${cap} seminggu</strong>.
+        Mata ini untuk ganjaran dan tidak mengubah skor prestasi anda.
+      </div>
+      <div style="height:10px;"></div>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
         ${left > 0 ? `${left} of ${cap} left this week` : `You have used all ${cap} this week — the count resets Monday.`}
       </div>
@@ -6056,6 +6348,11 @@
         </div>`).join('') + `</div>` : ''}
     `;
 
+    const intro = document.getElementById('ah-intro');
+    if(intro) intro.onclick = () => {
+      const ms = document.getElementById('ah-intro-ms');
+      if(ms) ms.hidden = !ms.hidden;
+    };
     const openBtn = document.getElementById('ah-open');
     if(!openBtn) return;
     openBtn.onclick = () => {
@@ -6688,6 +6985,10 @@
       <div class="card" style="margin-bottom:16px;">
         <div id="wp-afterhours"></div>
       </div>
+      <div class="eyebrow" style="margin-top:18px;">Extra work · Kerja tambahan</div>
+      <div class="card" style="margin-bottom:16px;">
+        <div id="wp-extra"></div>
+      </div>
       <div id="wp-postreminder"></div>
       <div id="wp-openboard"></div>
       ${myFailCount>0 ? `
@@ -6886,6 +7187,7 @@
     // actually bind.
     renderAfterHours(document.getElementById('wp-afterhours'), body, worker,
       targets.filter(t => t.isAfterHours && t.workerId === worker.id), mySubs);
+    renderExtraWork(document.getElementById('wp-extra'), worker);
     renderMyReminders(document.getElementById('wp-reminders'), body, worker);
     renderPostReminder(document.getElementById('wp-postreminder'), body, worker);
     renderOpenBoard(document.getElementById('wp-openboard'), worker);
@@ -7851,6 +8153,10 @@
       if(!subsMigrated){ await migrateOldSubs(); subsMigrated = true; }
       const snap = await db.collection(SUBS_COLLECTION).where('status','==','pending').limit(1).get();
       any = !snap.empty;
+      if(!any){
+        const xs = await db.collection(EXTRA_COLLECTION).where('status','==','pending').limit(1).get();
+        any = !xs.empty;
+      }
     }catch(e){ console.error('Could not check the review queue:', e); return; }
     const dot = document.getElementById('review-dot');
     if(dot) dot.style.display = any ? 'block' : 'none';
@@ -10741,13 +11047,13 @@
   async function renderReview(){
     const el = document.getElementById('view-review');
     el.innerHTML = `<div class="empty">Loading…</div>`;
-    const [subs, workers, targets, dayPts] = await Promise.all([
-      getPendingSubs(), getAllWorkers(), getTargets(), getDoListPoints()]);
+    const [subs, workers, targets, dayPts, extraClaims] = await Promise.all([
+      getPendingSubs(), getAllWorkers(), getTargets(), getDoListPoints(), getPendingExtraClaims()]);
     const workerMap = {}; workers.forEach(w=>workerMap[w.id]=w);
     const targetMap = {}; targets.forEach(t=>targetMap[t.id]=t);
     const allPending = subs.filter(s=>s.status==='pending').sort((a,b)=>a.submittedAt.localeCompare(b.submittedAt));
 
-    if(allPending.length===0){
+    if(allPending.length===0 && !extraClaims.length){
       el.innerHTML = `<div class="card"><div class="empty">No submissions awaiting review.<br>Photo proofs from workers will appear here.</div></div>`;
       return;
     }
@@ -10809,6 +11115,8 @@
     // thing to pick, and the list stays as short as the work demands. Your
     // own comes first, then the pile nobody owns, then other people's.
     const scopes = []
+      .concat(extraClaims.length ? [{ key:'extra', subs: [], extra: true,
+        label: `Extra work claims — admin only (${extraClaims.length})` }] : [])
       .concat(questSubs.length ? [{ key:'quests', subs: questSubs,
         label: `Challenger tasks — admin only (${questSubs.length})` }] : [])
       .concat(ahSubs.length ? [{ key:'afterhours', subs: ahSubs,
@@ -10858,6 +11166,16 @@
       const sel = document.getElementById('rv-scope');
       if(sel) reviewScope = sel.value;
       const chosen = scopes.find(x => x.key === reviewScope) || scopes[0];
+      if(chosen.extra){
+        let left = extraClaims.length;
+        document.getElementById('rv-count').textContent = `${left} awaiting review`;
+        drawExtraReview(document.getElementById('rv-list'), extraClaims, workerMap, () => {
+          left = Math.max(0, left - 1);
+          document.getElementById('rv-count').textContent = `${left} awaiting review`;
+          updateReviewDot();
+        });
+        return;
+      }
 
       const pending = chosen.subs;
       document.getElementById('rv-count').textContent = `${pending.length} awaiting review`;
@@ -11994,6 +12312,7 @@
       issues,
       challengers: challengerDoneList(w, ledger, ctx.targets, inP, challengerTitlesFrom(ctx)),
       hell: hellList(w, ledger, inP),
+      extras: extraWorkList(w, ledger, inP),
       period: ctx.cutoffDate ? 'period' : 'season'
     };
   }
@@ -12037,7 +12356,11 @@
             + `because the task was removed and its details have since been rolled up.`
           : 'Every challenger task finished and approved, with what it paid.')
       + repList('Hell Mode', 'var(--red)', hell, 'Points',
-        'Problems solved, helped with or given up. Giving up costs the penalty set on the problem.');
+        'Problems solved, helped with or given up. Giving up costs the penalty set on the problem.')
+      + repList('Extra work claimed and approved', 'var(--green)',
+        (m.extras || []).map(x => ({ what: x.what, when: x.when, extra: '+' + x.pts + ' pts' })), 'Points',
+        'Work beyond the job that this person reported and an admin approved — covering a colleague, '
+        + 'standby, one-off jobs, training others. Points only: none of it changes the score above.');
     return `
       <div class="rep-page">
         <div class="rep-hero">
@@ -13026,7 +13349,7 @@
     el.innerHTML = `
       <div class="card">
         <h3>After-hours recognition</h3>
-        <div class="help">What a worker earns for help given outside 9:00am–5:00pm, at the weekend or on a
+        <div class="help">What a worker earns for help given outside working hours, at the weekend or on a
           holiday, once their head approves it. These points go towards rewards only — they never change
           anyone's performance score. The cap counts approved and waiting entries together, and resets each Monday.</div>
         <div class="row2">
