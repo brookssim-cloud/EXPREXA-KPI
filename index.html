@@ -689,6 +689,12 @@
     }catch(e){ console.error('App Check could not start:', e); }
   })();
   const db = firebase.firestore();
+  // On iPhones the default streaming connection sometimes stalls, leaving a
+  // read waiting exactly 30 seconds before it answers — the sign-in screen
+  // and the leaderboard both sat there. Plain long polling answers each
+  // read as soon as the data is ready.
+  try{ db.settings({ experimentalForceLongPolling: true, experimentalAutoDetectLongPolling: false }); }
+  catch(e){ console.warn('Could not switch Firestore to long polling:', e); }
   // Load timing, for finding out what is slow on a real phone. Off unless
   // the page is opened with ?timing (it then stays on for that tab). Adds a
   // small stopwatch button; tapping it lists how long each step took and
@@ -703,7 +709,7 @@
     window.__ptAdd = function(label, extra){ add(now(), label, extra); };
     var ce = console.error;
     console.error = function(){
-      try{ add(now(), 'ERROR', Array.prototype.map.call(arguments, function(a){ return a && a.message ? a.message : String(a); }).join(' ').slice(0, 160)); }catch(e){}
+      try{ add(now(), 'ERROR', Array.prototype.map.call(arguments, function(a){ return a && a.message ? a.message : String(a); }).join(' ').slice(0, 400)); }catch(e){}
       return ce.apply(console, arguments);
     };
     try{
@@ -740,7 +746,7 @@
     function show(){
       var rows = log.slice().sort(function(a, b){ return a.at - b.at; }).map(function(r){
         return '<tr><td style="padding:2px 8px 2px 0;text-align:right;white-space:nowrap;">' + (r.at / 1000).toFixed(1) + 's</td><td style="padding:2px 8px 2px 0;">'
-          + r.label.replace(/</g, '&lt;') + '</td><td style="white-space:nowrap;color:#9aa4b2;">' + r.extra + '</td></tr>'; }).join('');
+          + r.label.replace(/</g, '&lt;') + '</td><td style="color:#9aa4b2;word-break:break-word;">' + r.extra + '</td></tr>'; }).join('');
       var box = document.getElementById('pt-box') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'pt-box' }));
       box.style.cssText = 'position:fixed;left:8px;right:8px;bottom:56px;max-height:60vh;overflow:auto;background:#111827;color:#fff;'
         + 'font:11.5px/1.45 monospace;padding:10px;border-radius:10px;z-index:100000;';
@@ -766,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24g';
+  const APP_BUILD = '2026-11-24h';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -2579,7 +2585,9 @@
       if(!t || seen.has(t.id) || workingIds.has(t.id) || t.status !== 'achieved') return;
       seen.add(t.id);
       if(t.isAfterHours) ah.push(t);
-      else if(t.sideQuestId) quests.push([t.workerId, t.sideQuestId, String(t.achievedAt || '')]);
+      // Objects, not [a, b, c]: Firestore refuses an array inside an array,
+      // which made every save of this summary fail.
+      else if(t.sideQuestId) quests.push({ w: t.workerId, q: t.sideQuestId, a: String(t.achievedAt || '') });
       else plain[t.workerId] = (plain[t.workerId] || 0) + 1;
     });
     return { plain, quests, ah, builtAt: Date.now() };
@@ -2629,8 +2637,8 @@
     Object.keys(sum.plain || {}).forEach(w => {
       for(let i = 0; i < sum.plain[w]; i++) out.push({ id: '~d|' + w + '|' + i, workerId: w, status: 'achieved', standIn: true });
     });
-    (sum.quests || []).forEach((q, i) => out.push({ id: '~q|' + i, workerId: q[0], status: 'achieved',
-      sideQuestId: q[1], achievedAt: q[2], standIn: true }));
+    (sum.quests || []).forEach((q, i) => { if(Array.isArray(q)) q = { w: q[0], q: q[1], a: q[2] };
+      out.push({ id: '~q|' + i, workerId: q.w, status: 'achieved', sideQuestId: q.q, achievedAt: q.a, standIn: true }); });
     (sum.ah || []).forEach(t => out.push(t));
     return out;
   }
