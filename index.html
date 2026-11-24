@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-24h';
+  const APP_BUILD = '2026-11-24i';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -7759,6 +7759,9 @@
         document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
         t.classList.add('active');
         document.getElementById('view-'+t.dataset.view).classList.add('active');
+        // Yesterday's top earner belongs with the rankings, not above every tab.
+        const dtEl = document.getElementById('admin-daytop');
+        if(dtEl) dtEl.style.display = t.dataset.view === 'leaderboard' ? '' : 'none';
         renderView(t.dataset.view);
       };
     });
