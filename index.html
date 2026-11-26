@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-26d';
+  const APP_BUILD = '2026-11-27a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11491,17 +11491,40 @@
             </select>
           </div>
         </div>
-        <div class="field" style="margin-top:10px;margin-bottom:0;">
-          <label style="font-size:11px;">Search by name</label>
-          <input type="text" id="log-filter-name" placeholder="Worker name…">
+        <div class="row2" style="margin-top:10px;">
+          <div class="field" style="margin-bottom:0;">
+            <label style="font-size:11px;">Category</label>
+            <select id="log-filter-cat">
+              <option value="all">All categories</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="challenger">Challenger</option>
+              <option value="problem">Problem solver</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:0;">
+            <label style="font-size:11px;">Search by name</label>
+            <input type="text" id="log-filter-name" placeholder="Worker name…">
+          </div>
         </div>
       </div>
       <div id="log-list"></div>
     `;
+    document.getElementById('log-filter-cat').onchange = () => drawLogTable(workers);
     document.getElementById('log-filter-status').onchange = () => drawLogTable(workers);
     document.getElementById('log-filter-role').onchange = () => drawLogTable(workers);
     document.getElementById('log-filter-name').oninput = () => drawLogTable(workers);
     await drawLogTable(workers);
+  }
+
+  // Which kind of work a submission was for. Read from the task when it is
+  // still on file, otherwise from what the submission recorded about itself
+  // (older tasks are archived). A Do-list day is daily work.
+  function logCategory(s, t){
+    if(isAfterHoursEntry(s, t)) return 'problem';
+    if(isChallengerEntry(s, t)) return 'challenger';
+    if((t && t.isWeekly) || (s && s.taskKind === 'weekly')) return 'weekly';
+    return 'daily';
   }
 
   async function loadMoreLog(workers){
@@ -11528,9 +11551,11 @@
     const statusFilter = document.getElementById('log-filter-status').value;
     const roleFilter = document.getElementById('log-filter-role').value;
     const nameFilter = (document.getElementById('log-filter-name').value || '').trim().toLowerCase();
+    const catFilter = (document.getElementById('log-filter-cat') || {}).value || 'all';
 
     const filtered = subs.filter(s=>{
       if(statusFilter!=='all' && s.status!==statusFilter) return false;
+      if(catFilter!=='all' && logCategory(s, targetMap[s.targetId])!==catFilter) return false;
       const w = workerMap[s.workerId];
       if(roleFilter!=='all' && (!w || w.role!==roleFilter)) return false;
       if(nameFilter && (!w || !w.name.toLowerCase().includes(nameFilter))) return false;
