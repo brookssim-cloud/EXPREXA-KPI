@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-26a';
+  const APP_BUILD = '2026-11-26d';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -1384,14 +1384,18 @@
   // quietly become part of how people are measured.
   const AH_OFFICE_START = 9 * 60;    // 09:00
   const AH_OFFICE_END   = 17 * 60;   // 17:00
+  // Now "Problem solver": any problem a worker sorted out, at any hour, not
+  // only help given outside working hours. Same entries, same admin review,
+  // same weekly count — the records already kept carry straight on. Its own
+  // setting keys, so the after-hours figures saved before don't carry over.
   const AH_POINTS_DEFAULT = 10;
-  const AH_CAP_DEFAULT = 3;          // approved entries per week
+  const AH_CAP_DEFAULT = 20;         // entries per week
   const ahPoints = s => {
-    const n = Number(s && s.afterHoursPoints);
+    const n = Number(s && s.problemPoints);
     return Number.isFinite(n) && n > 0 ? Math.round(n) : AH_POINTS_DEFAULT;
   };
   const ahCap = s => {
-    const n = Number(s && s.afterHoursWeeklyCap);
+    const n = Number(s && s.problemWeeklyCap);
     return Number.isFinite(n) && n > 0 ? Math.round(n) : AH_CAP_DEFAULT;
   };
   // "HH:MM" -> minutes, or null if it isn't a time.
@@ -2444,6 +2448,14 @@
             bumpSubStats(wid, changes.status === 'rejected'
               ? { reviewed: 1, rejected: 1 }
               : { reviewed: 1 });
+          }
+          // A problem-solver entry that is not approved gives its place in
+          // the week back. Marked on the task itself; it is not a daily or a
+          // weekly, so nothing that scores ever looks at it.
+          if(changes.status === 'rejected' && isAfterHoursSubId(id)){
+            const sd = await db.collection(SUBS_COLLECTION).doc(id).get();
+            const tid = sd.exists ? sd.data().targetId : null;
+            if(tid) await applyTargetDeltas({ statusChanges: { [tid]: { status: 'failed', failKind: 'notApproved' } } });
           }
         }catch(e){ console.error('Could not update review stats:', e); }
       }
@@ -6287,6 +6299,16 @@
       catch(e){ b.disabled = false; b.textContent = 'Reject'; alert('Could not reject: ' + e.message); }
     });
   }
+  // Problems solved (and the after-hours help that came before it), from the
+  // ledger. Tagged kind 'problem' from build 26d; earlier ones are known by
+  // the title they were given.
+  function problemList(w, ledger, inP){
+    const isProb = l => l.kind === 'problem' || /^(Problem solved|After-hours) — /.test(String(l.note || ''));
+    return (ledger || []).filter(l => l.workerId === w.id && l.type === 'earned' && isProb(l) && inP(l.date))
+      .map(l => ({ what: String(l.note || '').replace(/^(Problem solved|After-hours) — /, ''),
+        when: l.problemDate || l.date, pts: l.points || 0 }))
+      .sort((a,b) => String(a.when).localeCompare(String(b.when)));
+  }
   // Approved claims, from the ledger, for the performance report.
   function extraWorkList(w, ledger, inP){
     return (ledger || []).filter(l => l.workerId === w.id && l.type === 'earned' && l.kind === 'extra' && inP(l.date))
@@ -6299,11 +6321,8 @@
   // performance score — see the note on AH_OFFICE_START.
   async function renderAfterHours(host, body, worker, myEntries, mySubs){
     if(!host) return;
-    const [settings, closures] = await Promise.all([getSettings(), getList(K_HOLIDAY_CLOSURES)]);
+    const settings = await getSettings();
     const pts = ahPoints(settings), cap = ahCap(settings);
-    const closureDates = new Set((closures || [])
-      .filter(c => (c.workerIds || []).includes(worker.id) || (c.roles || []).includes(worker.role))
-      .map(c => c.date));
 
     const today = todayStr();
     const weekOf = mondayOfWeekMY(today);
@@ -6312,10 +6331,10 @@
 
     const statusLabel = t => {
       const sub = mySubs.find(s => s.targetId === t.id);
-      if(t.status === 'achieved') return `<span style="color:var(--green);font-weight:700;">Approved · +${t.points} pts</span>`;
-      if(sub && sub.status === 'rejected') return `<span style="color:var(--red);font-weight:700;">Sent back</span>`
+      if(t.status === 'achieved') return `<span style="color:var(--green);font-weight:700;">Approved · Diluluskan · +${t.points} pts</span>`;
+      if(sub && sub.status === 'rejected') return `<span style="color:var(--red);font-weight:700;">Not approved · Tidak diluluskan</span>`
         + (sub.reviewRemark ? `<div class="help" style="margin-top:3px;">${escapeHtml(sub.reviewRemark)}</div>` : '');
-      return `<span style="color:var(--muted);font-weight:700;">Waiting for your head</span>`;
+      return `<span style="color:var(--muted);font-weight:700;">Waiting for admin · Menunggu admin</span>`;
     };
     // The five most recent. The list is on the worker's main screen above
     // the reminder card, and a long one pushes everything else off the
@@ -6328,26 +6347,27 @@
       <!-- Tap the English to show the Malay, the same as a daily task's title. -->
       <div class="help has-ms" id="ah-intro" title="Tap for Bahasa Malaysia"
         style="margin-bottom:4px;cursor:pointer;border-bottom:1px dotted var(--line);display:inline;">
-        Answered the group or sorted a problem outside working hours, on a weekend
-        or on a holiday? Log it here and your head will review it.
+        Sorted out a problem — a customer issue, a mistake caught, a delay fixed, a question
+        answered for the team? Log it here with proof and an admin will review it.
         Worth <strong>${pts} pts</strong> each, up to <strong>${cap} a week</strong>.
         These points go towards rewards and do not change your performance score.
       </div>
       <div class="target-ms" id="ah-intro-ms" hidden style="margin-top:8px;">
-        Menjawab kumpulan atau menyelesaikan masalah di luar waktu bekerja, pada hujung minggu
-        atau cuti umum? Catat di sini dan ketua anda akan menyemaknya.
+        Selesaikan masalah — isu pelanggan, kesilapan dikesan, kelewatan diatasi, soalan
+        dijawab untuk pasukan? Catat di sini bersama bukti dan admin akan menyemaknya.
         Bernilai <strong>${pts} mata</strong> setiap satu, sehingga <strong>${cap} seminggu</strong>.
         Mata ini untuk ganjaran dan tidak mengubah skor prestasi anda.
       </div>
       <div style="height:10px;"></div>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
-        ${left > 0 ? `${left} of ${cap} left this week` : `You have used all ${cap} this week — the count resets Monday.`}
+        ${left > 0 ? `${left} of ${cap} left this week · ${left} daripada ${cap} lagi minggu ini`
+          : `You have used all ${cap} this week — the count resets Monday. · Semua ${cap} sudah digunakan minggu ini — dikira semula hari Isnin.`}
       </div>
-      ${left > 0 ? `<button class="btn btn-amber btn-sm" id="ah-open">Log after-hours help</button>` : ''}
+      ${left > 0 ? `<button class="btn btn-amber btn-sm" id="ah-open">Log a problem solved · Catat masalah diselesaikan</button>` : ''}
       <div id="ah-form"></div>
       ${recent.length ? `<div style="margin-top:14px;">` + recent.map(t => `
         <div style="padding:9px 0;border-top:1px solid var(--line);">
-          <div style="font-size:13px;font-weight:600;">${escapeHtml(t.ahNote || t.title || 'After-hours help')}</div>
+          <div style="font-size:13px;font-weight:600;">${escapeHtml(t.ahNote || t.title || 'Problem solved')}</div>
           <div class="help" style="margin-top:2px;">${escapeHtml(ahWhen(t))}</div>
           <div style="margin-top:4px;font-size:12px;">${statusLabel(t)}</div>
         </div>`).join('') + `</div>` : ''}
@@ -6365,22 +6385,19 @@
       if(formHost.innerHTML){ formHost.innerHTML = ''; return; }
       formHost.innerHTML = `
         <div style="margin-top:12px;">
-          <div class="field"><label>When did it happen?</label>
-            <div style="display:flex;gap:8px;">
-              <input type="date" id="ah-date" value="${today}" max="${today}" style="flex:1;">
-              <input type="text" id="ah-time" placeholder="21:40" maxlength="5" style="width:92px;">
-            </div>
+          <div class="field"><label>Date it happened · Tarikh ia berlaku</label>
+            <input type="date" id="ah-date" value="${today}" min="${addDaysMY(today, -30)}" max="${today}">
           </div>
-          <div class="field"><label>What did you do?</label>
+          <div class="field"><label>What was the problem, and what did you do? · Apa masalahnya, dan apa yang anda buat?</label>
             <textarea id="ah-note" rows="2" maxlength="200"
-              placeholder="e.g. Answered the group about the Penang shipment and arranged the re-book"></textarea>
+              placeholder="e.g. Shipment for Penang missed the flight — re-booked it on the next one / cth. Kiriman ke Penang terlepas penerbangan — ditempah semula"></textarea>
           </div>
           <div class="file-drop">
-            <div style="font-size:12.5px;color:var(--muted);">Screenshot as proof (the group message, the email, whatever shows it)</div>
+            <div style="font-size:12.5px;color:var(--muted);">Photo or screenshot as proof (required) · Gambar atau tangkapan skrin sebagai bukti (wajib)</div>
             <input type="file" accept="image/*" id="ah-file">
             <img class="thumb-preview" id="ah-thumb">
           </div>
-          <button class="btn btn-primary btn-sm" id="ah-send" disabled>Send to my head</button>
+          <button class="btn btn-primary btn-sm" id="ah-send" disabled>Send to admin · Hantar kepada admin</button>
           <div id="ah-msg" style="margin-top:6px;font-size:12px;"></div>
         </div>`;
 
@@ -6401,14 +6418,12 @@
       };
       sendEl.onclick = async () => {
         const date = document.getElementById('ah-date').value;
-        const time = document.getElementById('ah-time').value;
         const note = document.getElementById('ah-note').value.trim();
         msgEl.style.color = 'var(--red)';
-        if(!date || date > today){ msgEl.textContent = 'Pick the day it actually happened.'; return; }
-        if(!note){ msgEl.textContent = 'Say briefly what you did, so your head can approve it.'; return; }
-        if(!compressed){ msgEl.textContent = 'Attach a screenshot.'; return; }
-        const verdict = isAfterHoursMY(date, time, closureDates);
-        if(!verdict.ok){ msgEl.textContent = verdict.why; return; }
+        // Any hour counts now: a problem solved at 11am is as real as one at 11pm.
+        if(!date || date > today || date < addDaysMY(today, -30)){ msgEl.textContent = 'Pick the day it happened, within the last 30 days. · Pilih tarikh ia berlaku, dalam 30 hari lepas.'; return; }
+        if(note.length < 3){ msgEl.textContent = 'Say briefly what the problem was and what you did. · Terangkan ringkas masalah dan apa yang anda buat.'; return; }
+        if(!compressed){ msgEl.textContent = 'Attach a photo or screenshot. · Lampirkan gambar atau tangkapan skrin.'; return; }
 
         sendEl.disabled = true; sendEl.textContent = 'Sending…';
         // Re-read rather than trust the number drawn when the page loaded —
@@ -6417,24 +6432,24 @@
         if(fresh){
           const mineNow = fresh.filter(t => t.isAfterHours && t.workerId === worker.id);
           if(ahWeekCount(mineNow, worker.id, mondayOfWeekMY(date)) >= cap){
-            msgEl.textContent = `That week already has ${cap} logged.`;
-            sendEl.disabled = false; sendEl.textContent = 'Send to my head';
+            msgEl.textContent = `That week already has ${cap} logged. · Minggu itu sudah ada ${cap}.`;
+            sendEl.disabled = false; sendEl.textContent = 'Send to admin · Hantar kepada admin';
             return;
           }
         }
 
         const target = {
           id: uid(), workerId: worker.id,
-          title: 'After-hours — ' + note.slice(0, 60),
-          points: pts, period: 'After-hours', status: 'active',
-          createdAt: today, isAfterHours: true,
-          ahAt: date + 'T' + time, ahNote: note, ahWeekOf: mondayOfWeekMY(date),
+          title: 'Problem solved — ' + note.slice(0, 60),
+          points: pts, period: 'Problem solver', status: 'active',
+          createdAt: today, isAfterHours: true, isProblem: true,
+          ahAt: date, ahNote: note, ahWeekOf: mondayOfWeekMY(date),
           requiresPhoto: true
         };
         const added = await applyTargetDeltas({ add: [target] });
         if(added === false){
           msgEl.textContent = 'Could not save that — try again.';
-          sendEl.disabled = false; sendEl.textContent = 'Send to my head';
+          sendEl.disabled = false; sendEl.textContent = 'Send to admin · Hantar kepada admin';
           return;
         }
         const res = await addSub({
@@ -6448,11 +6463,11 @@
           // for the head to look at, and the target would sit there forever.
           await applyTargetDeltas({ removeIds: [target.id] });
           msgEl.textContent = 'Could not send that — try again.';
-          sendEl.disabled = false; sendEl.textContent = 'Send to my head';
+          sendEl.disabled = false; sendEl.textContent = 'Send to admin · Hantar kepada admin';
           return;
         }
         msgEl.style.color = 'var(--green)';
-        msgEl.textContent = 'Sent to your head.';
+        msgEl.textContent = 'Sent to admin. · Dihantar kepada admin.';
         renderWorkerDashboard(body, worker);
       };
     };
@@ -6472,7 +6487,7 @@
     const dt = new Date(d + 'T12:00:00Z');
     const day = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
     const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()];
-    return day + ' ' + dt.getUTCDate() + ' ' + mon + ', ' + clock;
+    return day + ' ' + dt.getUTCDate() + ' ' + mon + (clock ? ', ' + clock : '');
   }
 
   function renderDoListDay(tEl, body, worker, myTargets, mySubs, ctx){
@@ -7005,7 +7020,7 @@
       <div class="card" style="margin-bottom:16px;">
         <div id="wp-extra"></div>
       </div>
-      <div class="eyebrow" style="margin-top:18px;">After-hours help</div>
+      <div class="eyebrow" style="margin-top:18px;">Problem solver · Penyelesai masalah</div>
       <div class="card" style="margin-bottom:16px;">
         <div id="wp-afterhours"></div>
       </div>
@@ -10970,7 +10985,8 @@
     // ledger, which keeps every award all season, long after the task's own
     // record has been rolled up.
     const awarded = await appendLedger([Object.assign({id: uid(), workerId: t.workerId, type:'earned', points: t.points, note: t.title, date: todayStr(), at: earnedAt },
-      t.sideQuestId ? { kind: 'challenger', targetId: t.id, sideQuestId: t.sideQuestId } : {})]);
+      t.sideQuestId ? { kind: 'challenger', targetId: t.id, sideQuestId: t.sideQuestId }
+        : t.isAfterHours ? { kind: 'problem', targetId: t.id, problemDate: String(t.ahAt || '').slice(0, 10) } : {})]);
     if(!awarded){
       await applyTargetDeltas({ statusChanges: { [targetId]: { status:'active', achievedAt: null } } });
       showFbError('Points could not be saved, so this approval was undone. Try approving again.');
@@ -11153,7 +11169,7 @@
       .concat(questSubs.length ? [{ key:'quests', subs: questSubs,
         label: `Challenger tasks — admin only (${questSubs.length})` }] : [])
       .concat(ahSubs.length ? [{ key:'afterhours', subs: ahSubs,
-        label: `After-hours help — admin only (${ahSubs.length})` }] : [])
+        label: `Problem solver — admin only (${ahSubs.length})` }] : [])
       .concat(mine.length ? [{ key:'mine', subs: mine,
         label: `Only mine — routed to you (${mine.length})` }] : [])
       .concat(nobodys.length ? [{ key:'nobody', subs: nobodys,
@@ -11206,6 +11222,8 @@
           left = Math.max(0, left - 1);
           document.getElementById('rv-count').textContent = `${left} awaiting review`;
           updateReviewDot();
+          // Queue cleared: move on to the next one that still has work in it.
+          if(left === 0) renderReview();
         });
         return;
       }
@@ -11274,7 +11292,7 @@
             <div><div class="sub-title">${t ? escapeHtml(t.title) : (s.taskTitle ? escapeHtml(s.taskTitle) : '(task no longer on file)')}${taskDayChip(t, s)}</div>
             <div class="sub-meta">${whoLine}</div>
             ${t && t.isAfterHours ? `<div class="sub-meta" style="color:var(--amber);font-weight:700;">
-              After-hours help · ${escapeHtml(ahWhen(t))}</div>` : ''}</div>
+              ${t.isProblem ? 'Problem solver' : 'After-hours help'} · ${escapeHtml(ahWhen(t))}</div>` : ''}</div>
             <div class="target-pts">+${t?t.points:0} pts</div>
           </div>
           ${lazyPhotoSlot(s, 'sub-photo') || `<div class="sub-note" style="color:var(--muted);">No photo required for this task.</div>`}
@@ -12314,7 +12332,7 @@
       extra: f.points ? f.points + ' pts' : '—'
     });
     const myRejects = rejections === null ? null : rejections
-      .filter(s => s.workerId === w.id)
+      .filter(s => s.workerId === w.id && s.taskKind !== 'afterhours' && !isAfterHoursSubId(s.id))
       .sort((a,b)=> String(a.submittedAt||'').localeCompare(String(b.submittedAt||'')))
       .map(s => ({
         what: s.taskTitle,
@@ -12346,6 +12364,7 @@
       challengers: challengerDoneList(w, ledger, ctx.targets, inP, challengerTitlesFrom(ctx)),
       hell: hellList(w, ledger, inP),
       extras: extraWorkList(w, ledger, inP),
+      problems: problemList(w, ledger, inP),
       period: ctx.cutoffDate ? 'period' : 'season'
     };
   }
@@ -12390,6 +12409,10 @@
           : 'Every challenger task finished and approved, with what it paid.')
       + repList('Hell Mode', 'var(--red)', hell, 'Points',
         'Problems solved, helped with or given up. Giving up costs the penalty set on the problem.')
+      + repList('Problems solved', 'var(--amber-dark)',
+        (m.problems || []).map(x => ({ what: x.what, when: x.when, extra: '+' + x.pts + ' pts' })), 'Points',
+        'Problems this person sorted out and an admin approved. Points only: approving or rejecting '
+        + 'one never changes the score above.')
       + repList('Extra work claimed and approved', 'var(--green)',
         (m.extras || []).map(x => ({ what: x.what, when: x.when, extra: '+' + x.pts + ' pts' })), 'Points',
         'Work beyond the job that this person reported and an admin approved — covering a colleague, '
@@ -12451,7 +12474,7 @@
         </div>
         ${c.afterHours ? `<div class="rep-stats" style="margin-top:8px;">
           <div class="rep-stat"><div class="n" style="color:var(--amber-dark);">${c.afterHours}</div>
-            <div class="l">After-hours<br>help given</div></div>
+            <div class="l">Problems solved<br>(incl. after-hours help)</div></div>
         </div>` : ''}
         <div class="rep-stats" style="margin-top:8px;">
           <div class="rep-stat"><div class="n" style="color:var(--red);">${c.fails}</div><div class="l">Not submitted<br>hits reliability</div></div>
@@ -12771,7 +12794,7 @@
     document.getElementById('se-rep-all').onclick = () => openReports(rows.map(r => r.workerId));
     document.getElementById('se-csv').onclick = () => downloadCsv(`season-${id}.csv`,
       ['Rank','Worker','Role','Head','Score','Reliability','Quality','Challenger','Daily done','Daily given',
-       'Challenger done','Challenger taken','Not submitted','Rejected','Quality issues','After-hours','Points earned','Highest balance','Points redeemed','RM redeemed'],
+       'Challenger done','Challenger taken','Not submitted','Rejected','Quality issues','Problems solved','Points earned','Highest balance','Points redeemed','RM redeemed'],
       rows.map(r => { const c = r.counts || {}; return [r.rank, r.name, r.role, r.head, scorePct(seasonScoreOf(r)),
         fmtPart(r.parts && r.parts.reliability), fmtPart(r.parts && r.parts.quality), fmtPart(r.parts && r.parts.challenger),
         c.dailyDone, c.dailyAssigned, c.challengerDone, c.challengerAccepted, c.fails, c.rejected, c.issues || 0,
@@ -12925,7 +12948,7 @@
                   padding:5px 9px;background:#FFF3DD;border-radius:7px;width:fit-content;">
                 <span style="font-size:11px;">🌙</span>
                 <span style="font-size:10.5px;color:var(--amber-dark);font-weight:700;">
-                  ${c.afterHours} after-hours help${c.afterHours===1?'':'s'}</span>
+                  ${c.afterHours} problem${c.afterHours===1?'':'s'} solved</span>
               </div>` : ''}
               <div style="font-size:10.5px;color:var(--muted);margin-top:8px;">
                 ${c.dailyDone}/${c.dailyAssigned} daily &middot;
@@ -13381,10 +13404,10 @@
     const ahSettings = await getSettings();
     el.innerHTML = `
       <div class="card">
-        <h3>After-hours recognition</h3>
-        <div class="help">What a worker earns for help given outside working hours, at the weekend or on a
-          holiday, once their head approves it. These points go towards rewards only — they never change
-          anyone's performance score. The cap counts approved and waiting entries together, and resets each Monday.</div>
+        <h3>Problem solver</h3>
+        <div class="help">What a worker earns for each problem they sorted out, once an admin approves it.
+          These points go towards rewards only — they never change anyone's performance score.
+          The cap counts approved and waiting entries together, and resets each Monday.</div>
         <div class="row2">
           <div class="field"><label>Points per entry</label>
             <input type="number" id="ah-pts" min="1" value="${ahPoints(ahSettings)}"></div>
@@ -13555,12 +13578,12 @@
       // password and the owner name, and writing a stale copy back would
       // undo whatever else changed since this tab loaded.
       const fresh = await getSettings();
-      const ok = await setSettings({ ...fresh, afterHoursPoints: pts, afterHoursWeeklyCap: cap });
+      const ok = await setSettings({ ...fresh, problemPoints: pts, problemWeeklyCap: cap });
       this.disabled = false; this.textContent = 'Save';
       if(ok){
         msg.style.color = 'var(--green)';
         msg.textContent = `Saved — ${pts} pts each, up to ${cap} a week.`;
-        adminLog('Changed after-hours recognition', pts + ' pts, cap ' + cap, 'change');
+        adminLog('Changed problem solver points', pts + ' pts, cap ' + cap, 'change');
       }else{
         msg.textContent = 'Could not save — try again.';
       }
