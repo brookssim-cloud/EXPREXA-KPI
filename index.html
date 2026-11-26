@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-25b';
+  const APP_BUILD = '2026-11-26a';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -2422,6 +2422,11 @@
         adminLog(changes.status === 'approved' ? 'Approved a submission' : 'Rejected a submission',
           changes.reviewRemark || '', 'review');
       }
+      // An approval with a remark stays on the worker's screen until they
+      // tap "Got it" — someone who left at 6pm reads it the next morning
+      // instead of finding it gone.
+      if(changes.status === 'approved' && changes.reviewRemark)
+        changes = Object.assign({}, changes, { remarkUnread: true });
       await db.collection(SUBS_COLLECTION).doc(id).update(changes);
       // Keep the running tallies in step when a submission is reviewed.
       if(changes.status === 'approved' || changes.status === 'rejected'){
@@ -6666,6 +6671,13 @@
       (t.status!=='achieved' || t.achievedAt === _todayStr)
     ).map(t=>t.id);
     const subs = await getSubsForTargets(myTargetIds);
+    // Approvals with a remark the worker has not cleared yet, from any day.
+    try{
+      const ur = await db.collection(SUBS_COLLECTION).where('workerId','==',worker.id)
+        .where('remarkUnread','==',true).limit(40).get();
+      const have = new Set(subs.map(x => x.id));
+      ur.docs.forEach(d => { const x = d.data(); if(!have.has(x.id)) subs.push(x); });
+    }catch(e){ console.error('Could not load unread remarks:', e); }
     // A Do-list day is sent as one submission carrying targetIds, under its
     // own id, so the fetch above never finds it. Today's is read further
     // down for the checklist; any earlier day still on the list is read
@@ -6714,11 +6726,19 @@
       subs.filter(s => s.workerId === worker.id && s.status === 'approved' && s.reviewRemark)
           .map(s => s.targetId)
     );
+    // Remarks now stay until the worker clears them, whatever day they were
+    // approved. Approvals from before that (no remarkUnread flag) keep the
+    // old rule: until 5am the morning after.
+    const unreadTargetIds = new Set(
+      subs.filter(s => s.workerId === worker.id && s.status === 'approved' && s.reviewRemark && s.remarkUnread === true)
+          .map(s => s.targetId)
+    );
     const myApprovedToday = targets
       .filter(t=>t.workerId===worker.id && t.status==='achieved'
-        && visibleApprovalDays.includes(t.achievedAt)
-        && remarkedTargetIds.has(t.id))
-      .sort((a,b)=> b.points - a.points);
+        && (unreadTargetIds.has(t.id)
+          || (visibleApprovalDays.includes(t.achievedAt) && remarkedTargetIds.has(t.id)
+              && !subs.some(s => s.targetId === t.id && s.remarkUnread === false))))
+      .sort((a,b)=> String(b.achievedAt||'').localeCompare(String(a.achievedAt||'')) || b.points - a.points);
     const myTargets = myActiveTargets.concat(myApprovedToday);
     const mySubs = subs.filter(s=>s.workerId===worker.id);
     const targetsAchieved = achievedCountFor(targets, worker.id) + archiveCountFor(archive, worker.id, 'achieved');
@@ -6981,13 +7001,13 @@
       <div class="eyebrow">My targets</div>
       <div id="wp-dolist"></div>
       <div id="wp-targets"></div>
-      <div class="eyebrow" style="margin-top:18px;">After-hours help</div>
-      <div class="card" style="margin-bottom:16px;">
-        <div id="wp-afterhours"></div>
-      </div>
       <div class="eyebrow" style="margin-top:18px;">Extra work · Kerja tambahan</div>
       <div class="card" style="margin-bottom:16px;">
         <div id="wp-extra"></div>
+      </div>
+      <div class="eyebrow" style="margin-top:18px;">After-hours help</div>
+      <div class="card" style="margin-bottom:16px;">
+        <div id="wp-afterhours"></div>
       </div>
       <div id="wp-postreminder"></div>
       <div id="wp-openboard"></div>
@@ -7267,11 +7287,24 @@
             <div class="target-pts">+${t.points} pts</div>
           </div>
           ${canSubmit ? `<div class="target-actions"><button class="btn btn-amber btn-sm" data-submit="${t.id}">${needsPhoto ? 'Submit Proof Photo' : 'Mark Complete'}</button></div>` : ''}
+          ${t.status==='achieved' && lastSub && lastSub.status==='approved' && lastSub.reviewRemark
+            ? `<div class="target-actions"><button class="btn btn-ghost btn-sm" data-remark-ok="${escapeHtml(lastSub.id)}" data-remark-target="${t.id}">Got it · Faham ✓</button></div>` : ''}
           <div id="submit-form-${t.id}"></div>
         </div>`;
     }).join('') + `</div>`;
 
     const myTargetMap = {}; listTargets.forEach(t=> myTargetMap[t.id]=t);
+    // "Got it": the remark has been read, so the approved task can go.
+    tEl.querySelectorAll('[data-remark-ok]').forEach(btn => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try{
+          await db.collection(SUBS_COLLECTION).doc(btn.dataset.remarkOk).update({ remarkUnread: false, remarkReadAt: new Date().toISOString() });
+          const item = btn.closest('.target-item');
+          if(item) item.remove();
+        }catch(e){ btn.disabled = false; alert('Could not clear it — try again. / Tidak dapat dikosongkan — cuba lagi.'); }
+      };
+    });
     // Tap the title to show the Malay, tap again to put it away. Bound
     // after every redraw, so it survives a submission clearing the list.
     tEl.querySelectorAll('[data-ms]').forEach(el=>{
