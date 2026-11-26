@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-27a';
+  const APP_BUILD = '2026-11-27b';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -11457,16 +11457,26 @@
   // history up front — a submission carries an embedded photo, so a full load
   // is expensive in both reads and bandwidth.
   let logRows = [], logCursor = null, logDone = false, logLoading = false;
+  // Extra-work claims live in a collection of their own, so they are read
+  // once (they are small — the photo is a separate document) and shown in
+  // the same table as submissions.
+  let logExtras = [];
 
   async function renderLog(){
     const el = document.getElementById('view-log');
     el.innerHTML = `<div class="empty">Loading…</div>`;
     logRows = []; logCursor = null; logDone = false;
-    const [firstPage, workers, roles] = await Promise.all([getSubsPage(null), getAllWorkers(), getRoles()]);
+    const [firstPage, workers, roles, extraSnap] = await Promise.all([getSubsPage(null), getAllWorkers(), getRoles(),
+      db.collection(EXTRA_COLLECTION).get().catch(e => { console.error('Could not load extra work:', e); return null; })]);
     logRows = firstPage.rows; logCursor = firstPage.lastDoc; logDone = firstPage.done;
+    logExtras = extraSnap ? extraSnap.docs.map(d => d.data()).map(c => ({
+      id: 'xw:' + c.id, _extra: c, workerId: c.workerId, targetId: null,
+      submittedAt: c.submittedAt || '', status: c.status, note: c.note || '',
+      reviewRemark: c.remark || null, reviewedBy: c.reviewedBy || null,
+      taskTitle: 'Extra work — ' + extraLabel(c) + ' · +' + extraPoints(c) + ' pts' + (c.activityDate ? ' · happened ' + c.activityDate : '') })) : [];
     const subs = logRows;
 
-    if(subs.length===0){
+    if(subs.length===0 && !logExtras.length){
       el.innerHTML = `<div class="card"><div class="empty">No submissions yet.<br>Every photo proof — pending, approved, or rejected — will show up here.</div></div>`;
       return;
     }
@@ -11500,6 +11510,7 @@
               <option value="weekly">Weekly</option>
               <option value="challenger">Challenger</option>
               <option value="problem">Problem solver</option>
+              <option value="extra">Extra work</option>
             </select>
           </div>
           <div class="field" style="margin-bottom:0;">
@@ -11521,6 +11532,7 @@
   // still on file, otherwise from what the submission recorded about itself
   // (older tasks are archived). A Do-list day is daily work.
   function logCategory(s, t){
+    if(s && s._extra) return 'extra';
     if(isAfterHoursEntry(s, t)) return 'problem';
     if(isChallengerEntry(s, t)) return 'challenger';
     if((t && t.isWeekly) || (s && s.taskKind === 'weekly')) return 'weekly';
@@ -11543,7 +11555,7 @@
   async function drawLogTable(workers){
     const el = document.getElementById('log-list');
     if(!el) return;
-    const subs = logRows;
+    const subs = logRows.concat(logExtras);
     const targets = await getTargets();
     const workerMap = {}; workers.forEach(w=>workerMap[w.id]=w);
     const targetMap = {}; targets.forEach(t=>targetMap[t.id]=t);
@@ -11594,7 +11606,9 @@
     tbody.innerHTML = sorted.map(s=>{
       const w = workerMap[s.workerId]; const t = targetMap[s.targetId];
       const dt = new Date(s.submittedAt);
-      const photoCell = (s.hasPhoto || s.photo)
+      const photoCell = s._extra
+        ? `<div class="log-table-thumb" data-xw-logphoto="${escapeHtml(s._extra.id)}" style="display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);background:var(--paper);">…</div>`
+        : (s.hasPhoto || s.photo)
         ? (lazyPhotoSlot(s, 'log-table-thumb') || '')
         : `<div class="log-table-thumb" style="display:flex;align-items:center;justify-content:center;font-size:15px;color:var(--muted);background:var(--paper);">📝</div>`;
       return `
@@ -11611,6 +11625,14 @@
     fillLazyPhotos(tbody);
     tbody.querySelectorAll('[data-lightbox]').forEach(img=>{
       img.onclick = ()=> openLightbox(img.dataset.lightbox);
+    });
+    tbody.querySelectorAll('[data-xw-logphoto]').forEach(async slot => {
+      const photo = await getExtraPhoto(slot.dataset.xwLogphoto);
+      if(!slot.parentNode) return;
+      if(!photo){ slot.textContent = '—'; return; }
+      const img = document.createElement('img');
+      img.className = 'log-table-thumb'; img.src = photo; img.onclick = () => openLightbox(photo);
+      slot.replaceWith(img);
     });
   }
 
