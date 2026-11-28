@@ -772,7 +772,7 @@
   // keeps running whatever build it last fetched, so there has to be a way
   // to see which one that is and to ask for a newer one without clearing
   // anything by hand. Bumped on every upload.
-  const APP_BUILD = '2026-11-27b';
+  const APP_BUILD = '2026-11-28c';
   // The address to hand a worker. Built from wherever the app is actually
   // being served from, so it stays right if the repo or folder is renamed,
   // and strips any #worker the admin happens to be sitting on.
@@ -6048,11 +6048,16 @@
       { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:48 },
       { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:96 },
       { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:192 } ] },
+    { id:'coverx', en:'Cover on an off-day or public holiday',
+      ms:'Ganti pada hari rehat atau cuti umum', opts:[
+      { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:72 },
+      { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:144 },
+      { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:288 } ] },
     { id:'standby', en:'Standby day', ms:'Hari siap sedia', opts:[
       { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:32 },
       { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:64 },
       { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:96 } ] },
-    { id:'oneoff', en:'One-off job', ms:'Kerja sekali sahaja', opts:[
+    { id:'oneoff', en:'One-off job & overtime', ms:'Kerja sekali sahaja & lebih masa', opts:[
       { id:'3h',  en:'Up to 3 hours', ms:'Sehingga 3 jam', pts:25 },
       { id:'5h',  en:'Up to 5 hours', ms:'Sehingga 5 jam', pts:50 },
       { id:'day', en:'Full day',      ms:'Sehari penuh',   pts:100 } ] },
